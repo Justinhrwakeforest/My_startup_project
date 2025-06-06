@@ -1,4 +1,4 @@
-# apps/startups/views.py - Enhanced views with detail page actions
+# apps/startups/views.py - Fixed version without circular import
 
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
@@ -16,6 +16,10 @@ from .serializers import (
     StartupRatingDetailSerializer, StartupCommentDetailSerializer
 )
 
+class IndustryViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Industry.objects.all()
+    serializer_class = IndustrySerializer
+
 class StartupViewSet(viewsets.ModelViewSet):
     queryset = Startup.objects.all().select_related('industry').prefetch_related(
         'founders', 'tags', 'ratings', 'comments', 'likes', 'bookmarks'
@@ -26,6 +30,74 @@ class StartupViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'description', 'tags__tag', 'location', 'founders__name']
     ordering_fields = ['name', 'founded_year', 'created_at', 'views', 'employee_count', 'average_rating']
     ordering = ['-created_at']
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        params = self.request.query_params
+        
+        # Advanced search across multiple fields
+        search_query = params.get('search')
+        if search_query:
+            queryset = queryset.filter(
+                Q(name__icontains=search_query) |
+                Q(description__icontains=search_query) |
+                Q(tags__tag__icontains=search_query) |
+                Q(location__icontains=search_query) |
+                Q(founders__name__icontains=search_query) |
+                Q(industry__name__icontains=search_query)
+            ).distinct()
+        
+        # Industry filtering (multiple industries)
+        industries = params.getlist('industry')
+        if industries:
+            queryset = queryset.filter(industry__id__in=industries)
+        
+        # Location filtering
+        location = params.get('location')
+        if location:
+            queryset = queryset.filter(location__icontains=location)
+        
+        # Company size filtering
+        min_employees = params.get('min_employees')
+        max_employees = params.get('max_employees')
+        if min_employees:
+            queryset = queryset.filter(employee_count__gte=int(min_employees))
+        if max_employees:
+            queryset = queryset.filter(employee_count__lte=int(max_employees))
+        
+        # Founded year range
+        min_year = params.get('min_founded_year')
+        max_year = params.get('max_founded_year')
+        if min_year:
+            queryset = queryset.filter(founded_year__gte=int(min_year))
+        if max_year:
+            queryset = queryset.filter(founded_year__lte=int(max_year))
+        
+        # Filter by minimum rating
+        min_rating = params.get('min_rating')
+        if min_rating:
+            queryset = queryset.annotate(
+                avg_rating=Avg('ratings__rating')
+            ).filter(avg_rating__gte=float(min_rating))
+        
+        # Filter by funding status
+        has_funding = params.get('has_funding')
+        if has_funding == 'true':
+            queryset = queryset.exclude(Q(funding_amount='') | Q(funding_amount__isnull=True))
+        elif has_funding == 'false':
+            queryset = queryset.filter(Q(funding_amount='') | Q(funding_amount__isnull=True))
+        
+        # Filter by tags
+        tags = params.getlist('tags')
+        if tags:
+            queryset = queryset.filter(tags__tag__in=tags).distinct()
+        
+        # Featured filter
+        featured_only = params.get('featured')
+        if featured_only == 'true':
+            queryset = queryset.filter(is_featured=True)
+        
+        return queryset
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -55,7 +127,90 @@ class StartupViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(optimized_instance)
         return Response(serializer.data)
     
-    # ... (keep existing methods like get_queryset, featured, trending, recommendations, filters)
+    @action(detail=False, methods=['get'])
+    def featured(self, request):
+        """Get featured startups"""
+        featured_startups = self.get_queryset().filter(is_featured=True)
+        serializer = self.get_serializer(featured_startups, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def trending(self, request):
+        """Get trending startups based on recent activity"""
+        # Get startups with recent activity (views, ratings, comments, likes)
+        trending_startups = self.get_queryset().annotate(
+            recent_activity=Count('ratings', filter=Q(ratings__created_at__gte=timezone.now() - timedelta(days=7))) +
+                          Count('comments', filter=Q(comments__created_at__gte=timezone.now() - timedelta(days=7))) +
+                          Count('likes', filter=Q(likes__created_at__gte=timezone.now() - timedelta(days=7)))
+        ).order_by('-recent_activity', '-views')[:10]
+        
+        serializer = self.get_serializer(trending_startups, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def recommendations(self, request):
+        """Get personalized startup recommendations"""
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        user = request.user
+        
+        # Get user's interests
+        user_interests = user.interests.values_list('interest', flat=True)
+        
+        # Get user's liked/rated startups' industries
+        liked_industries = Industry.objects.filter(
+            startups__in=user.startuplike_set.values_list('startup', flat=True)
+        ).distinct()
+        
+        # Recommend startups in similar industries or matching interests
+        recommended = self.get_queryset().filter(
+            Q(industry__in=liked_industries) | 
+            Q(tags__tag__in=user_interests)
+        ).exclude(
+            id__in=user.startuplike_set.values_list('startup', flat=True)
+        ).annotate(
+            avg_rating=Avg('ratings__rating')
+        ).order_by('-avg_rating', '-views').distinct()[:10]
+        
+        serializer = self.get_serializer(recommended, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def filters(self, request):
+        """Get available filter options"""
+        # Get all industries with startup counts
+        industries = Industry.objects.annotate(
+            startup_count=Count('startups')
+        ).filter(startup_count__gt=0).order_by('name')
+        
+        # Get location options
+        locations = Startup.objects.values_list('location', flat=True).distinct().order_by('location')
+        
+        # Get popular tags
+        popular_tags = Startup.objects.values_list('tags__tag', flat=True).annotate(
+            count=Count('tags__tag')
+        ).order_by('-count')[:20]
+        
+        # Get employee count ranges
+        employee_ranges = [
+            {'label': '1-10', 'min': 1, 'max': 10},
+            {'label': '11-50', 'min': 11, 'max': 50},
+            {'label': '51-200', 'min': 51, 'max': 200},
+            {'label': '201-500', 'min': 201, 'max': 500},
+            {'label': '500+', 'min': 500, 'max': None},
+        ]
+        
+        return Response({
+            'industries': IndustrySerializer(industries, many=True).data,
+            'locations': [loc for loc in locations if loc],
+            'popular_tags': [tag for tag in popular_tags if tag],
+            'employee_ranges': employee_ranges,
+            'founded_year_range': {
+                'min': Startup.objects.aggregate(min_year=Min('founded_year'))['min_year'],
+                'max': Startup.objects.aggregate(max_year=Max('founded_year'))['max_year']
+            }
+        })
     
     @action(detail=True, methods=['get'])
     def metrics(self, request, pk=None):
@@ -279,7 +434,6 @@ class StartupViewSet(viewsets.ModelViewSet):
     def jobs(self, request, pk=None):
         """Get all jobs for this startup"""
         startup = self.get_object()
-        from apps.jobs.serializers import JobListSerializer
         
         jobs = startup.jobs.filter(is_active=True).select_related('job_type').prefetch_related('skills')
         
@@ -302,10 +456,30 @@ class StartupViewSet(viewsets.ModelViewSet):
         paginator = Paginator(jobs, 10)
         jobs_page = paginator.get_page(page)
         
-        serializer = JobListSerializer(jobs_page, many=True, context={'request': request})
+        # Inline job serialization to avoid circular import
+        jobs_data = []
+        for job in jobs_page:
+            job_data = {
+                'id': job.id,
+                'title': job.title,
+                'description': job.description,
+                'location': job.location,
+                'salary_range': job.salary_range,
+                'is_remote': job.is_remote,
+                'is_urgent': job.is_urgent,
+                'experience_level': job.experience_level,
+                'experience_level_display': job.get_experience_level_display(),
+                'job_type_name': job.job_type.name if job.job_type else '',
+                'posted_ago': job.posted_ago,
+                'skills_list': [skill.skill for skill in job.skills.all()],
+                'posted_at': job.posted_at,
+                'has_applied': False,  # You can implement this check if needed
+                'application_count': job.applications.count(),
+            }
+            jobs_data.append(job_data)
         
         return Response({
-            'results': serializer.data,
+            'results': jobs_data,
             'count': paginator.count,
             'has_next': jobs_page.has_next(),
             'has_previous': jobs_page.has_previous(),
