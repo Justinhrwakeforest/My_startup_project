@@ -1,7 +1,8 @@
+# apps/jobs/serializers.py - Fixed version without circular import
+
 from rest_framework import serializers
 from django.db import models
 from .models import JobType, Job, JobSkill, JobApplication
-from apps.startups.serializers import StartupListSerializer
 
 class JobTypeSerializer(serializers.ModelSerializer):
     job_count = serializers.SerializerMethodField()
@@ -58,7 +59,8 @@ class JobListSerializer(serializers.ModelSerializer):
         return obj.applications.count()
 
 class JobDetailSerializer(JobListSerializer):
-    startup_detail = StartupListSerializer(source='startup', read_only=True)
+    # Use method field for startup_detail to avoid circular import
+    startup_detail = serializers.SerializerMethodField()
     skills = JobSkillSerializer(many=True, read_only=True)
     similar_jobs = serializers.SerializerMethodField()
     requirements = serializers.SerializerMethodField()
@@ -67,6 +69,28 @@ class JobDetailSerializer(JobListSerializer):
         fields = JobListSerializer.Meta.fields + [
             'startup_detail', 'skills', 'similar_jobs', 'requirements'
         ]
+    
+    def get_startup_detail(self, obj):
+        """Get startup information without circular import"""
+        startup = obj.startup
+        return {
+            'id': startup.id,
+            'name': startup.name,
+            'logo': startup.logo,
+            'description': startup.description,
+            'industry_name': startup.industry.name,
+            'industry_icon': startup.industry.icon,
+            'location': startup.location,
+            'website': startup.website,
+            'employee_count': startup.employee_count,
+            'founded_year': startup.founded_year,
+            'is_featured': startup.is_featured,
+            'funding_amount': startup.funding_amount,
+            'valuation': startup.valuation,
+            'average_rating': startup.average_rating,
+            'total_ratings': startup.total_ratings,
+            'views': startup.views,
+        }
     
     def get_similar_jobs(self, obj):
         """Get similar jobs from the same company or with similar skills"""
