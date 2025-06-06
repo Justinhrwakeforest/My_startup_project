@@ -1,10 +1,76 @@
-# apps/startups/serializers.py - Enhanced serializers for startup details
+# apps/startups/serializers.py - Fixed version without circular import
 
 from rest_framework import serializers
 from .models import Industry, Startup, StartupFounder, StartupTag, StartupRating, StartupComment, StartupBookmark, StartupLike
-from apps.jobs.models import Job
-from apps.jobs.serializers import JobListSerializer
 
+class IndustrySerializer(serializers.ModelSerializer):
+    startup_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Industry
+        fields = ['id', 'name', 'description', 'icon', 'startup_count']
+    
+    def get_startup_count(self, obj):
+        return obj.startups.count()
+
+class StartupFounderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StartupFounder
+        fields = ['id', 'name', 'title', 'bio']
+
+class StartupTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StartupTag
+        fields = ['id', 'tag']
+
+class StartupRatingSerializer(serializers.ModelSerializer):
+    user_name = serializers.CharField(source='user.username', read_only=True)
+    
+    class Meta:
+        model = StartupRating
+        fields = ['id', 'user', 'user_name', 'rating', 'created_at']
+        read_only_fields = ['user', 'created_at']
+
+class StartupCommentSerializer(serializers.ModelSerializer):
+    user_name = serializers.CharField(source='user.username', read_only=True)
+    
+    class Meta:
+        model = StartupComment
+        fields = ['id', 'user', 'user_name', 'text', 'likes', 'created_at']
+        read_only_fields = ['user', 'likes', 'created_at']
+
+class StartupListSerializer(serializers.ModelSerializer):
+    industry_name = serializers.CharField(source='industry.name', read_only=True)
+    industry_icon = serializers.CharField(source='industry.icon', read_only=True)
+    average_rating = serializers.ReadOnlyField()
+    total_ratings = serializers.ReadOnlyField()
+    is_bookmarked = serializers.SerializerMethodField()
+    is_liked = serializers.SerializerMethodField()
+    tags_list = serializers.StringRelatedField(source='tags', many=True, read_only=True)
+    
+    class Meta:
+        model = Startup
+        fields = [
+            'id', 'name', 'description', 'industry', 'industry_name', 'industry_icon',
+            'location', 'website', 'logo', 'funding_amount', 'valuation', 'employee_count',
+            'founded_year', 'is_featured', 'revenue', 'user_count', 'growth_rate',
+            'views', 'average_rating', 'total_ratings', 'is_bookmarked', 'is_liked',
+            'tags_list', 'created_at'
+        ]
+    
+    def get_is_bookmarked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return StartupBookmark.objects.filter(startup=obj, user=request.user).exists()
+        return False
+    
+    def get_is_liked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return StartupLike.objects.filter(startup=obj, user=request.user).exists()
+        return False
+
+# Detailed serializers for startup detail page
 class StartupFounderDetailSerializer(serializers.ModelSerializer):
     """Detailed founder information for startup detail page"""
     class Meta:
@@ -59,32 +125,25 @@ class StartupCommentDetailSerializer(serializers.ModelSerializer):
         else:
             return f"{diff.seconds // 60} minutes ago"
 
-class StartupDetailSerializer(serializers.ModelSerializer):
+class StartupDetailSerializer(StartupListSerializer):
     """Comprehensive startup detail serializer"""
-    industry_name = serializers.CharField(source='industry.name', read_only=True)
-    industry_icon = serializers.CharField(source='industry.icon', read_only=True)
     industry_detail = serializers.SerializerMethodField()
     
     # User interaction status
-    is_bookmarked = serializers.SerializerMethodField()
-    is_liked = serializers.SerializerMethodField()
     user_rating = serializers.SerializerMethodField()
     
     # Related data
     founders = StartupFounderDetailSerializer(many=True, read_only=True)
     tags = StartupTagDetailSerializer(many=True, read_only=True)
-    tags_list = serializers.StringRelatedField(source='tags', many=True, read_only=True)
     
     # Ratings and comments with pagination-like limiting
     recent_ratings = serializers.SerializerMethodField()
     recent_comments = serializers.SerializerMethodField()
     
-    # Jobs at this startup
+    # Jobs at this startup - using method field to avoid circular import
     open_jobs = serializers.SerializerMethodField()
     
     # Statistics
-    average_rating = serializers.ReadOnlyField()
-    total_ratings = serializers.ReadOnlyField()
     total_likes = serializers.SerializerMethodField()
     total_bookmarks = serializers.SerializerMethodField()
     total_comments = serializers.SerializerMethodField()
@@ -95,17 +154,11 @@ class StartupDetailSerializer(serializers.ModelSerializer):
     # Social proof metrics
     engagement_metrics = serializers.SerializerMethodField()
     
-    class Meta:
-        model = Startup
-        fields = [
-            'id', 'name', 'description', 'industry', 'industry_name', 'industry_icon', 'industry_detail',
-            'location', 'website', 'logo', 'funding_amount', 'valuation', 'employee_count',
-            'founded_year', 'is_featured', 'revenue', 'user_count', 'growth_rate',
-            'views', 'created_at', 'updated_at',
-            'is_bookmarked', 'is_liked', 'user_rating',
-            'founders', 'tags', 'tags_list',
+    class Meta(StartupListSerializer.Meta):
+        fields = StartupListSerializer.Meta.fields + [
+            'industry_detail', 'user_rating', 'founders', 'tags',
             'recent_ratings', 'recent_comments', 'open_jobs',
-            'average_rating', 'total_ratings', 'total_likes', 'total_bookmarks', 'total_comments',
+            'total_likes', 'total_bookmarks', 'total_comments',
             'similar_startups', 'engagement_metrics'
         ]
     
@@ -117,18 +170,6 @@ class StartupDetailSerializer(serializers.ModelSerializer):
             'icon': obj.industry.icon,
             'description': obj.industry.description
         }
-    
-    def get_is_bookmarked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return StartupBookmark.objects.filter(startup=obj, user=request.user).exists()
-        return False
-    
-    def get_is_liked(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return StartupLike.objects.filter(startup=obj, user=request.user).exists()
-        return False
     
     def get_user_rating(self, obj):
         request = self.context.get('request')
@@ -148,9 +189,30 @@ class StartupDetailSerializer(serializers.ModelSerializer):
         return StartupCommentDetailSerializer(recent_comments, many=True).data
     
     def get_open_jobs(self, obj):
-        """Get open jobs at this startup"""
+        """Get open jobs at this startup - using inline serialization to avoid circular import"""
         jobs = obj.jobs.filter(is_active=True).select_related('job_type').prefetch_related('skills')[:5]
-        return JobListSerializer(jobs, many=True, context=self.context).data
+        
+        # Inline job serialization to avoid circular import
+        jobs_data = []
+        for job in jobs:
+            job_data = {
+                'id': job.id,
+                'title': job.title,
+                'description': job.description,
+                'location': job.location,
+                'salary_range': job.salary_range,
+                'is_remote': job.is_remote,
+                'is_urgent': job.is_urgent,
+                'experience_level': job.experience_level,
+                'experience_level_display': job.get_experience_level_display(),
+                'job_type_name': job.job_type.name if job.job_type else '',
+                'posted_ago': job.posted_ago,
+                'skills_list': [skill.skill for skill in job.skills.all()],
+                'posted_at': job.posted_at,
+            }
+            jobs_data.append(job_data)
+        
+        return jobs_data
     
     def get_total_likes(self, obj):
         return obj.likes.count()
