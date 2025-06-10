@@ -1,4 +1,4 @@
-# apps/startups/views.py - Fixed with proper bookmark handling
+# apps/startups/views.py - Fixed version with proper bookmark handling
 
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
@@ -34,6 +34,12 @@ class StartupViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         params = self.request.query_params
+        
+        # Check if we want only bookmarked startups
+        bookmarked_only = params.get('bookmarked')
+        if bookmarked_only == 'true' and self.request.user.is_authenticated:
+            bookmarked_ids = self.request.user.startupbookmark_set.values_list('startup_id', flat=True)
+            queryset = queryset.filter(id__in=bookmarked_ids)
         
         # Advanced search across multiple fields
         search_query = params.get('search')
@@ -145,35 +151,6 @@ class StartupViewSet(viewsets.ModelViewSet):
         ).order_by('-recent_activity', '-views')[:10]
         
         serializer = self.get_serializer(trending_startups, many=True)
-        return Response(serializer.data)
-    
-    @action(detail=False, methods=['get'])
-    def recommendations(self, request):
-        """Get personalized startup recommendations"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
-        
-        user = request.user
-        
-        # Get user's interests
-        user_interests = user.interests.values_list('interest', flat=True)
-        
-        # Get user's liked/rated startups' industries
-        liked_industries = Industry.objects.filter(
-            startups__in=user.startuplike_set.values_list('startup', flat=True)
-        ).distinct()
-        
-        # Recommend startups in similar industries or matching interests
-        recommended = self.get_queryset().filter(
-            Q(industry__in=liked_industries) | 
-            Q(tags__tag__in=user_interests)
-        ).exclude(
-            id__in=user.startuplike_set.values_list('startup', flat=True)
-        ).annotate(
-            avg_rating=Avg('ratings__rating')
-        ).order_by('-avg_rating', '-views').distinct()[:10]
-        
-        serializer = self.get_serializer(recommended, many=True)
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
@@ -301,7 +278,8 @@ class StartupViewSet(viewsets.ModelViewSet):
         return Response({
             'bookmarked': bookmarked,
             'message': message,
-            'total_bookmarks': total_bookmarks
+            'total_bookmarks': total_bookmarks,
+            'startup_id': startup.id
         })
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
@@ -330,7 +308,8 @@ class StartupViewSet(viewsets.ModelViewSet):
         return Response({
             'liked': liked,
             'message': message,
-            'total_likes': total_likes
+            'total_likes': total_likes,
+            'startup_id': startup.id
         })
     
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticatedOrReadOnly])
@@ -353,28 +332,3 @@ class StartupViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(bookmarked_startups, many=True)
         return Response(serializer.data)
-    
-    # Add more action methods...
-    @action(detail=True, methods=['delete'])
-    def delete_comment(self, request, pk=None):
-        """Delete a comment (only by comment author)"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
-        
-        startup = self.get_object()
-        comment_id = request.data.get('comment_id')
-        
-        if not comment_id:
-            return Response({'error': 'Comment ID required'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            comment = StartupComment.objects.get(
-                id=comment_id, 
-                startup=startup, 
-                user=request.user
-            )
-            comment.delete()
-            return Response({'message': 'Comment deleted successfully'})
-        except StartupComment.DoesNotExist:
-            return Response({'error': 'Comment not found or unauthorized'}, 
-                          status=status.HTTP_404_NOT_FOUND)
