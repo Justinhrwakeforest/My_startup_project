@@ -1,4 +1,4 @@
-# apps/users/urls.py - Updated with new endpoints
+# apps/users/urls.py
 from django.urls import path
 from .views import (
     UserRegistrationView, UserLoginView, UserLogoutView, UserProfileView,
