@@ -1,10 +1,9 @@
-# startup_hub/startup_hub/urls.py
+# In startup_hub/urls.py
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse
 
 def api_stats(request):
-    """Simple stats endpoint"""
     from apps.startups.models import Startup
     from apps.jobs.models import Job
     from apps.startups.models import Industry
