@@ -7,6 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from django.contrib.auth import login, logout
 from django.contrib.auth.hashers import check_password
 from django.http import JsonResponse
+from django.db import models
 import json
 from .serializers import (
     UserRegistrationSerializer, UserLoginSerializer, UserProfileSerializer, 
