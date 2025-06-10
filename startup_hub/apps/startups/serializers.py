@@ -1,4 +1,4 @@
-# apps/startups/serializers.py - Fixed version without circular import
+# apps/startups/serializers.py - Updated with proper bookmark handling
 
 from rest_framework import serializers
 from .models import Industry, Startup, StartupFounder, StartupTag, StartupRating, StartupComment, StartupBookmark, StartupLike
@@ -47,6 +47,9 @@ class StartupListSerializer(serializers.ModelSerializer):
     is_bookmarked = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
     tags_list = serializers.StringRelatedField(source='tags', many=True, read_only=True)
+    total_likes = serializers.SerializerMethodField()
+    total_bookmarks = serializers.SerializerMethodField()
+    total_comments = serializers.SerializerMethodField()
     
     class Meta:
         model = Startup
@@ -55,7 +58,7 @@ class StartupListSerializer(serializers.ModelSerializer):
             'location', 'website', 'logo', 'funding_amount', 'valuation', 'employee_count',
             'founded_year', 'is_featured', 'revenue', 'user_count', 'growth_rate',
             'views', 'average_rating', 'total_ratings', 'is_bookmarked', 'is_liked',
-            'tags_list', 'created_at'
+            'tags_list', 'created_at', 'total_likes', 'total_bookmarks', 'total_comments'
         ]
     
     def get_is_bookmarked(self, obj):
@@ -69,6 +72,15 @@ class StartupListSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             return StartupLike.objects.filter(startup=obj, user=request.user).exists()
         return False
+    
+    def get_total_likes(self, obj):
+        return obj.likes.count()
+    
+    def get_total_bookmarks(self, obj):
+        return obj.bookmarks.count()
+    
+    def get_total_comments(self, obj):
+        return obj.comments.count()
 
 # Detailed serializers for startup detail page
 class StartupFounderDetailSerializer(serializers.ModelSerializer):
@@ -143,11 +155,6 @@ class StartupDetailSerializer(StartupListSerializer):
     # Jobs at this startup - using method field to avoid circular import
     open_jobs = serializers.SerializerMethodField()
     
-    # Statistics
-    total_likes = serializers.SerializerMethodField()
-    total_bookmarks = serializers.SerializerMethodField()
-    total_comments = serializers.SerializerMethodField()
-    
     # Similar startups
     similar_startups = serializers.SerializerMethodField()
     
@@ -158,7 +165,6 @@ class StartupDetailSerializer(StartupListSerializer):
         fields = StartupListSerializer.Meta.fields + [
             'industry_detail', 'user_rating', 'founders', 'tags',
             'recent_ratings', 'recent_comments', 'open_jobs',
-            'total_likes', 'total_bookmarks', 'total_comments',
             'similar_startups', 'engagement_metrics'
         ]
     
@@ -213,15 +219,6 @@ class StartupDetailSerializer(StartupListSerializer):
             jobs_data.append(job_data)
         
         return jobs_data
-    
-    def get_total_likes(self, obj):
-        return obj.likes.count()
-    
-    def get_total_bookmarks(self, obj):
-        return obj.bookmarks.count()
-    
-    def get_total_comments(self, obj):
-        return obj.comments.count()
     
     def get_similar_startups(self, obj):
         """Get similar startups based on industry and tags"""
