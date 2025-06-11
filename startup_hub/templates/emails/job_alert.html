@@ -143,6 +143,22 @@
             background-color: #f7fafc;
             border-radius: 8px;
         }
+        .urgent-badge {
+            background-color: #fed7d7;
+            color: #c53030;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .remote-badge {
+            background-color: #c6f6d5;
+            color: #22543d;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
         @media (max-width: 600px) {
             body {
                 padding: 10px;
@@ -183,14 +199,14 @@
             <div class="job-meta">
                 <span>📍 {{ job.location }}</span>
                 {% if job.is_remote %}
-                    <span>🏠 Remote</span>
+                    <span class="remote-badge">🏠 Remote</span>
                 {% endif %}
                 {% if job.salary_range %}
                     <span>💰 {{ job.salary_range }}</span>
                 {% endif %}
                 <span>⏰ {{ job.posted_ago }}</span>
                 {% if job.is_urgent %}
-                    <span style="color: #e53e3e;">🚨 Urgent</span>
+                    <span class="urgent-badge">🚨 Urgent</span>
                 {% endif %}
             </div>
             
@@ -200,4 +216,55 @@
             
             {% if job.skills.all %}
             <div class="job-tags">
-                {% for skill in job.skills.all|slice:
+                {% for skill in job.skills.all|slice:":5" %}
+                    <span class="tag">{{ skill.skill }}</span>
+                {% endfor %}
+                {% if job.skills.all|length > 5 %}
+                    <span class="tag">+{{ job.skills.all|length|add:"-5" }} more</span>
+                {% endif %}
+            </div>
+            {% endif %}
+            
+            <a href="{{ dashboard_url }}/jobs/{{ job.id }}" class="cta-button">View Job Details</a>
+        </div>
+        {% endfor %}
+
+        {% if total_jobs > jobs|length %}
+        <div class="more-jobs">
+            <h3 style="margin: 0 0 10px 0; color: #2d3748;">{{ total_jobs|add:jobs|length|add:"-"|add:jobs|length }} More Jobs Available</h3>
+            <p style="margin: 0 0 15px 0; color: #718096;">Don't miss out on other opportunities that match your criteria.</p>
+            <a href="{{ dashboard_url }}/jobs?alert={{ alert.id }}" class="cta-button">View All {{ total_jobs }} Jobs</a>
+        </div>
+        {% endif %}
+
+        <div style="background-color: #f7fafc; padding: 20px; border-radius: 8px; margin: 30px 0;">
+            <h3 style="margin: 0 0 10px 0; color: #2d3748;">Manage Your Job Alerts</h3>
+            <p style="margin: 0 0 15px 0; color: #718096;">
+                You're receiving this because you set up a job alert for "{{ alert.title }}". 
+                You can modify your alert settings or create new ones in your dashboard.
+            </p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <a href="{{ dashboard_url }}/settings/alerts" class="cta-button" style="background: #4299e1;">Manage Alerts</a>
+                <a href="{{ dashboard_url }}/jobs" class="cta-button" style="background: #48bb78;">Browse All Jobs</a>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>
+                <strong>{{ site_name }}</strong> - Connecting talent with innovative startups
+            </p>
+            <p style="margin: 10px 0;">
+                <a href="{{ dashboard_url }}">Visit Dashboard</a> | 
+                <a href="{{ dashboard_url }}/settings/alerts">Manage Alerts</a> | 
+                <a href="{{ unsubscribe_url }}">Unsubscribe</a>
+            </p>
+            <p style="margin: 15px 0 0 0; font-size: 12px; color: #a0aec0;">
+                This alert was sent to {{ user.email }}. 
+                <br>
+                If you no longer wish to receive job alerts, you can 
+                <a href="{{ unsubscribe_url }}" style="color: #a0aec0;">unsubscribe here</a>.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
