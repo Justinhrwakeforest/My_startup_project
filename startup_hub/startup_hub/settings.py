@@ -131,3 +131,47 @@ LOGGING = {
         },
     },
 }
+
+# Add these settings to startup_hub/startup_hub/settings.py
+
+# Email Configuration
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+
+# For development, you can use console backend to see emails in console
+# EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# SMTP Configuration (example for Gmail)
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'your-email@gmail.com'  # Your email
+EMAIL_HOST_PASSWORD = 'your-app-password'  # Your app password
+
+# For other email services:
+# SendGrid:
+# EMAIL_HOST = 'smtp.sendgrid.net'
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True
+# EMAIL_HOST_USER = 'apikey'
+# EMAIL_HOST_PASSWORD = 'your-sendgrid-api-key'
+
+# Email addresses
+DEFAULT_FROM_EMAIL = 'StartupHub <noreply@startuphub.com>'
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+
+# Frontend URL for email links
+FRONTEND_URL = 'http://localhost:3000'  # Change to your frontend URL
+
+# Job Alert Settings
+JOB_ALERT_FROM_EMAIL = DEFAULT_FROM_EMAIL
+JOB_ALERT_BATCH_SIZE = 100  # Number of alerts to process in one batch
+JOB_ALERT_MAX_JOBS_PER_EMAIL = 10  # Maximum jobs to include in one email
+
+# Celery Configuration (for background tasks)
+# Uncomment if you want to use Celery for sending emails asynchronously
+# CELERY_BROKER_URL = 'redis://localhost:6379'
+# CELERY_RESULT_BACKEND = 'redis://localhost:6379'
+# CELERY_ACCEPT_CONTENT = ['application/json']
+# CELERY_TASK_SERIALIZER = 'json'
+# CELERY_RESULT_SERIALIZER = 'json'
+# CELERY_TIMEZONE = TIME_ZONE
