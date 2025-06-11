@@ -1,0 +1,203 @@
+<!-- startup_hub/templates/emails/job_alert.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ site_name }} Job Alert</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8fafc;
+        }
+        .container {
+            background-color: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .logo {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+        .alert-title {
+            color: #1a202c;
+            font-size: 24px;
+            font-weight: 600;
+            margin: 0 0 10px 0;
+        }
+        .job-count {
+            color: #718096;
+            font-size: 16px;
+        }
+        .job-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 16px;
+            background-color: #fff;
+            transition: box-shadow 0.2s ease;
+        }
+        .job-card:hover {
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        .job-title {
+            color: #2d3748;
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0 0 8px 0;
+            text-decoration: none;
+        }
+        .job-title:hover {
+            color: #4299e1;
+        }
+        .company-name {
+            color: #4299e1;
+            font-weight: 500;
+            margin-bottom: 10px;
+        }
+        .job-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 12px;
+            font-size: 14px;
+            color: #718096;
+        }
+        .job-meta span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .job-description {
+            color: #4a5568;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+        .job-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .tag {
+            background-color: #edf2f7;
+            color: #4a5568;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .cta-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 500;
+            display: inline-block;
+            margin-top: 10px;
+        }
+        .cta-button:hover {
+            opacity: 0.9;
+        }
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+            text-align: center;
+            color: #718096;
+            font-size: 14px;
+        }
+        .footer a {
+            color: #4299e1;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+        .more-jobs {
+            text-align: center;
+            margin: 30px 0;
+            padding: 20px;
+            background-color: #f7fafc;
+            border-radius: 8px;
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            .container {
+                padding: 20px;
+            }
+            .job-meta {
+                flex-direction: column;
+                gap: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">S</div>
+            <h1 class="alert-title">{{ alert.title }}</h1>
+            <p class="job-count">
+                {% if total_jobs == 1 %}
+                    {{ total_jobs }} new job matches your criteria
+                {% else %}
+                    {{ total_jobs }} new jobs match your criteria
+                {% endif %}
+            </p>
+        </div>
+
+        <p>Hi {{ user.first_name|default:user.username }},</p>
+        
+        <p>Great news! We found {{ total_jobs }} new job{% if total_jobs != 1 %}s{% endif %} that match your alert "{{ alert.title }}":</p>
+
+        {% for job in jobs %}
+        <div class="job-card">
+            <a href="{{ dashboard_url }}/jobs/{{ job.id }}" class="job-title">{{ job.title }}</a>
+            <div class="company-name">{{ job.startup.name }}</div>
+            
+            <div class="job-meta">
+                <span>📍 {{ job.location }}</span>
+                {% if job.is_remote %}
+                    <span>🏠 Remote</span>
+                {% endif %}
+                {% if job.salary_range %}
+                    <span>💰 {{ job.salary_range }}</span>
+                {% endif %}
+                <span>⏰ {{ job.posted_ago }}</span>
+                {% if job.is_urgent %}
+                    <span style="color: #e53e3e;">🚨 Urgent</span>
+                {% endif %}
+            </div>
+            
+            <div class="job-description">
+                {{ job.description|truncatewords:30 }}
+            </div>
+            
+            {% if job.skills.all %}
+            <div class="job-tags">
+                {% for skill in job.skills.all|slice:
