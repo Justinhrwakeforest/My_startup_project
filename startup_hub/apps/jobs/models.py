@@ -1,47 +1,266 @@
-# Create apps/jobs/models.py - Add JobAlert model
+# startup_hub/apps/jobs/models.py
+from django.db import models
+from django.contrib.auth import get_user_model
+from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
+from datetime import timedelta
+
+User = get_user_model()
+
+class JobType(models.Model):
+    name = models.CharField(max_length=20, unique=True)
+    
+    def __str__(self):
+        return self.name
+
+class Job(models.Model):
+    EXPERIENCE_CHOICES = [
+        ('entry', 'Entry Level'),
+        ('mid', 'Mid Level'),
+        ('senior', 'Senior Level'),
+        ('lead', 'Lead/Principal'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('paused', 'Paused'),
+        ('closed', 'Closed'),
+        ('draft', 'Draft'),
+    ]
+    
+    startup = models.ForeignKey('startups.Startup', on_delete=models.CASCADE, related_name='jobs')
+    title = models.CharField(max_length=100)
+    description = models.TextField()
+    location = models.CharField(max_length=100)
+    job_type = models.ForeignKey(JobType, on_delete=models.CASCADE)
+    salary_range = models.CharField(max_length=50, blank=True)
+    
+    # Work options
+    is_remote = models.BooleanField(default=False)
+    is_urgent = models.BooleanField(default=False)
+    
+    # Requirements
+    experience_level = models.CharField(
+        max_length=20, 
+        choices=EXPERIENCE_CHOICES, 
+        default='mid'
+    )
+    
+    # Status and dates
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    posted_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    
+    # Tracking
+    view_count = models.PositiveIntegerField(default=0)
+    application_deadline = models.DateTimeField(null=True, blank=True)
+    
+    # Additional fields
+    requirements = models.TextField(blank=True, help_text="Job requirements in detail")
+    benefits = models.TextField(blank=True, help_text="Benefits and perks")
+    
+    class Meta:
+        ordering = ['-posted_at']
+        indexes = [
+            models.Index(fields=['posted_at']),
+            models.Index(fields=['is_active', 'status']),
+            models.Index(fields=['startup', 'is_active']),
+        ]
+    
+    def __str__(self):
+        return f"{self.title} at {self.startup.name}"
+    
+    @property
+    def posted_ago(self):
+        """Human readable time since posting"""
+        now = timezone.now()
+        diff = now - self.posted_at
+        
+        if diff.days > 0:
+            return f"{diff.days} day{'s' if diff.days != 1 else ''} ago"
+        elif diff.seconds > 3600:
+            hours = diff.seconds // 3600
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        elif diff.seconds > 60:
+            minutes = diff.seconds // 60
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        else:
+            return "Just now"
+    
+    @property
+    def days_since_posted(self):
+        """Number of days since posting"""
+        return (timezone.now() - self.posted_at).days
+    
+    @property
+    def is_expired(self):
+        """Check if job posting has expired"""
+        if self.expires_at:
+            return timezone.now() > self.expires_at
+        return False
+    
+    @property
+    def days_until_expiry(self):
+        """Days until job expires"""
+        if self.expires_at:
+            diff = self.expires_at - timezone.now()
+            return max(0, diff.days)
+        return None
+    
+    def increment_view_count(self):
+        """Increment view count"""
+        self.view_count += 1
+        self.save(update_fields=['view_count'])
+
+class JobSkill(models.Model):
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='skills')
+    skill = models.CharField(max_length=30)
+    is_required = models.BooleanField(default=True)
+    proficiency_level = models.CharField(
+        max_length=20,
+        choices=[
+            ('beginner', 'Beginner'),
+            ('intermediate', 'Intermediate'),
+            ('advanced', 'Advanced'),
+            ('expert', 'Expert'),
+        ],
+        default='intermediate'
+    )
+    
+    class Meta:
+        unique_together = ['job', 'skill']
+        indexes = [
+            models.Index(fields=['skill']),
+        ]
+    
+    def __str__(self):
+        return f"{self.skill} ({self.job.title})"
+
+class JobApplication(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('reviewing', 'Under Review'),
+        ('interview', 'Interview Scheduled'),
+        ('offer', 'Offer Extended'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('withdrawn', 'Withdrawn'),
+    ]
+    
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='applications')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_applications')
+    
+    # Application content
+    cover_letter = models.TextField(blank=True)
+    resume = models.FileField(upload_to='resumes/', blank=True)
+    
+    # Additional application data
+    additional_info = models.JSONField(default=dict, blank=True)
+    
+    # Status tracking
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    applied_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    # Review tracking
+    reviewed_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='reviewed_applications'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    # Interview details
+    interview_scheduled_at = models.DateTimeField(null=True, blank=True)
+    interview_notes = models.TextField(blank=True)
+    
+    class Meta:
+        unique_together = ['job', 'user']
+        ordering = ['-applied_at']
+        indexes = [
+            models.Index(fields=['status', 'applied_at']),
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['job', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.job.title}"
+    
+    @property
+    def days_since_applied(self):
+        """Days since application was submitted"""
+        return (timezone.now() - self.applied_at).days
 
 class JobAlert(models.Model):
     ALERT_FREQUENCY_CHOICES = [
+        ('immediate', 'Immediate'),
         ('daily', 'Daily'),
         ('weekly', 'Weekly'),
-        ('immediate', 'Immediate'),
     ]
     
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_alerts')
     title = models.CharField(max_length=100)
+    
+    # Alert criteria
     keywords = models.TextField(blank=True, help_text="Comma-separated keywords")
     location = models.CharField(max_length=100, blank=True)
     job_type = models.ForeignKey(JobType, on_delete=models.SET_NULL, null=True, blank=True)
     experience_level = models.CharField(max_length=20, choices=Job.EXPERIENCE_CHOICES, blank=True)
     is_remote = models.BooleanField(default=False)
     industry = models.ForeignKey('startups.Industry', on_delete=models.SET_NULL, null=True, blank=True)
+    min_salary = models.CharField(max_length=20, blank=True)
+    max_salary = models.CharField(max_length=20, blank=True)
+    
+    # Alert settings
     frequency = models.CharField(max_length=20, choices=ALERT_FREQUENCY_CHOICES, default='daily')
     is_active = models.BooleanField(default=True)
+    
+    # Tracking
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     last_sent = models.DateTimeField(null=True, blank=True)
+    total_sent = models.PositiveIntegerField(default=0)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=['frequency', 'is_active']),
+        ]
     
     def __str__(self):
         return f"{self.user.username} - {self.title}"
     
     def get_matching_jobs(self):
         """Get jobs that match this alert criteria"""
-        queryset = Job.objects.filter(is_active=True)
+        from django.db.models import Q
+        
+        queryset = Job.objects.filter(is_active=True, status='active')
         
         # Filter by keywords
         if self.keywords:
-            keywords = [k.strip() for k in self.keywords.split(',')]
+            keywords = [k.strip() for k in self.keywords.split(',') if k.strip()]
             keyword_q = Q()
             for keyword in keywords:
                 keyword_q |= (
                     Q(title__icontains=keyword) |
                     Q(description__icontains=keyword) |
-                    Q(skills__skill__icontains=keyword)
+                    Q(skills__skill__icontains=keyword) |
+                    Q(startup__name__icontains=keyword)
                 )
             queryset = queryset.filter(keyword_q).distinct()
         
         # Filter by location
         if self.location:
-            queryset = queryset.filter(location__icontains=self.location)
+            queryset = queryset.filter(
+                Q(location__icontains=self.location) | 
+                Q(is_remote=True)  # Include remote jobs for any location
+            )
         
         # Filter by job type
         if self.job_type:
@@ -60,159 +279,124 @@ class JobAlert(models.Model):
             queryset = queryset.filter(startup__industry=self.industry)
         
         return queryset.order_by('-posted_at')
+    
+    def should_send_alert(self):
+        """Check if alert should be sent based on frequency"""
+        if not self.is_active:
+            return False
+        
+        now = timezone.now()
+        
+        if self.frequency == 'immediate':
+            # Send immediately when new jobs are posted
+            return True
+        elif self.frequency == 'daily':
+            # Send daily if not sent today
+            if not self.last_sent or self.last_sent.date() < now.date():
+                return True
+        elif self.frequency == 'weekly':
+            # Send weekly if not sent in the last 7 days
+            if not self.last_sent or self.last_sent < now - timedelta(days=7):
+                return True
+        
+        return False
+    
+    def mark_as_sent(self):
+        """Mark alert as sent"""
+        self.last_sent = timezone.now()
+        self.total_sent += 1
+        self.save(update_fields=['last_sent', 'total_sent'])
 
-
-# Create apps/jobs/serializers.py - Add JobAlert serializers
-
-class JobAlertSerializer(serializers.ModelSerializer):
-    job_type_name = serializers.CharField(source='job_type.name', read_only=True)
-    industry_name = serializers.CharField(source='industry.name', read_only=True)
-    matching_jobs_count = serializers.SerializerMethodField()
+class JobView(models.Model):
+    """Track job views for analytics"""
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='job_views')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    ip_address = models.GenericIPAddressField()
+    user_agent = models.TextField(blank=True)
+    viewed_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        model = JobAlert
-        fields = [
-            'id', 'title', 'keywords', 'location', 'job_type', 'job_type_name',
-            'experience_level', 'is_remote', 'industry', 'industry_name',
-            'frequency', 'is_active', 'created_at', 'last_sent', 'matching_jobs_count'
+        indexes = [
+            models.Index(fields=['job', 'viewed_at']),
+            models.Index(fields=['user', 'viewed_at']),
         ]
-        read_only_fields = ['last_sent']
+
+class JobBookmark(models.Model):
+    """Allow users to bookmark jobs"""
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='bookmarks')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_bookmarks')
+    created_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True)
     
-    def get_matching_jobs_count(self, obj):
-        return obj.get_matching_jobs().count()
-
-
-# Create apps/jobs/views.py - Add JobAlert viewset
-
-from rest_framework import viewsets
-from .models import JobAlert
-from .serializers import JobAlertSerializer
-
-class JobAlertViewSet(viewsets.ModelViewSet):
-    serializer_class = JobAlertSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    class Meta:
+        unique_together = ['job', 'user']
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'created_at']),
+        ]
     
-    def get_queryset(self):
-        return JobAlert.objects.filter(user=self.request.user).order_by('-created_at')
+    def __str__(self):
+        return f"{self.user.username} bookmarked {self.job.title}"
+
+class JobShare(models.Model):
+    """Track job shares"""
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='shares')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    platform = models.CharField(
+        max_length=20,
+        choices=[
+            ('email', 'Email'),
+            ('linkedin', 'LinkedIn'),
+            ('twitter', 'Twitter'),
+            ('facebook', 'Facebook'),
+            ('copy_link', 'Copy Link'),
+            ('other', 'Other'),
+        ],
+        default='copy_link'
+    )
+    shared_at = models.DateTimeField(auto_now_add=True)
     
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+    class Meta:
+        indexes = [
+            models.Index(fields=['job', 'shared_at']),
+        ]
+
+class ApplicationNote(models.Model):
+    """Notes for job applications (by recruiters/hiring managers)"""
+    application = models.ForeignKey(
+        JobApplication, 
+        on_delete=models.CASCADE, 
+        related_name='notes'
+    )
+    author = models.ForeignKey(User, on_delete=models.CASCADE)
+    note = models.TextField()
+    is_internal = models.BooleanField(default=True)  # Internal notes vs candidate-visible
+    created_at = models.DateTimeField(auto_now_add=True)
     
-    @action(detail=True, methods=['get'])
-    def preview(self, request, pk=None):
-        """Preview jobs that match this alert"""
-        alert = self.get_object()
-        matching_jobs = alert.get_matching_jobs()[:10]  # Limit to 10 for preview
-        
-        from .serializers import JobListSerializer
-        serializer = JobListSerializer(matching_jobs, many=True, context={'request': request})
-        
-        return Response({
-            'alert': JobAlertSerializer(alert).data,
-            'matching_jobs': serializer.data,
-            'total_matches': alert.get_matching_jobs().count()
-        })
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['application', 'created_at']),
+        ]
     
-    @action(detail=True, methods=['post'])
-    def test_send(self, request, pk=None):
-        """Test send alert email"""
-        alert = self.get_object()
-        matching_jobs = alert.get_matching_jobs()[:5]
-        
-        if matching_jobs.exists():
-            # Here you would implement email sending
-            # For now, just return the jobs that would be sent
-            from .serializers import JobListSerializer
-            serializer = JobListSerializer(matching_jobs, many=True, context={'request': request})
-            
-            return Response({
-                'message': f'Test alert would include {len(serializer.data)} jobs',
-                'jobs': serializer.data
-            })
-        else:
-            return Response({
-                'message': 'No matching jobs found for this alert'
-            })
+    def __str__(self):
+        return f"Note for {self.application}"
 
-
-# Create apps/core/management/commands/send_job_alerts.py
-
-from django.core.management.base import BaseCommand
-from django.utils import timezone
-from datetime import timedelta
-from apps.jobs.models import JobAlert, Job
-from django.core.mail import send_mail
-from django.template.loader import render_to_string
-from django.conf import settings
-
-class Command(BaseCommand):
-    help = 'Send job alerts to users'
-
-    def add_arguments(self, parser):
-        parser.add_argument(
-            '--frequency',
-            type=str,
-            choices=['immediate', 'daily', 'weekly'],
-            help='Send alerts for specific frequency',
-        )
-        parser.add_argument(
-            '--dry-run',
-            action='store_true',
-            help='Show what would be sent without actually sending',
-        )
-
-    def handle(self, *args, **options):
-        frequency = options.get('frequency')
-        dry_run = options.get('dry_run', False)
-        
-        # Get alerts that need to be sent
-        alerts_to_send = JobAlert.objects.filter(is_active=True)
-        
-        if frequency:
-            alerts_to_send = alerts_to_send.filter(frequency=frequency)
-        
-        # Filter based on when they were last sent
-        now = timezone.now()
-        for alert in alerts_to_send:
-            should_send = False
-            
-            if alert.frequency == 'immediate':
-                # For immediate alerts, check if there are new jobs since last sent
-                if alert.last_sent:
-                    new_jobs = alert.get_matching_jobs().filter(posted_at__gt=alert.last_sent)
-                    should_send = new_jobs.exists()
-                else:
-                    should_send = True
-            
-            elif alert.frequency == 'daily':
-                # Send daily if not sent today
-                if not alert.last_sent or alert.last_sent.date() < now.date():
-                    should_send = True
-            
-            elif alert.frequency == 'weekly':
-                # Send weekly if not sent in the last 7 days
-                if not alert.last_sent or alert.last_sent < now - timedelta(days=7):
-                    should_send = True
-            
-            if should_send:
-                matching_jobs = alert.get_matching_jobs()
-                
-                # For immediate alerts, only include new jobs
-                if alert.frequency == 'immediate' and alert.last_sent:
-                    matching_jobs = matching_jobs.filter(posted_at__gt=alert.last_sent)
-                else:
-                    # For daily/weekly, include jobs from the last period
-                    if alert.frequency == 'daily':
-                        cutoff = now - timedelta(days=1)
-                    else:  # weekly
-                        cutoff = now - timedelta(days=7)
-                    matching_jobs = matching_jobs.filter(posted_at__gte=cutoff)
-                
-                if matching_jobs.exists():
-                    if dry_run:
-                        self.stdout.write(
-                            f"Would send alert '{alert.title}' to {alert.user.email} "
-                            f"with {matching_jobs.count()} jobs"
-                        )
-                    else:
-                        self.send_job_alert(alert, matching_jobs)
+class JobTemplate(models.Model):
+    """Job posting templates for startups"""
+    startup = models.ForeignKey('startups.Startup', on_delete=models.CASCADE, related_name='job_templates')
+    name = models.CharField(max_length=100)
+    title_template = models.CharField(max_length=100)
+    description_template = models.TextField()
+    requirements_template = models.TextField(blank=True)
+    benefits_template = models.TextField(blank=True)
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ['startup', 'name']
+    
+    def __str__(self):
+        return f"{self.startup.name} - {self.name}"
