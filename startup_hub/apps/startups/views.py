@@ -279,7 +279,8 @@ class StartupViewSet(viewsets.ModelViewSet):
             'bookmarked': bookmarked,
             'message': message,
             'total_bookmarks': total_bookmarks,
-            'startup_id': startup.id
+            'startup_id': startup.id,
+            'success': True  # Add this for consistency
         })
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
