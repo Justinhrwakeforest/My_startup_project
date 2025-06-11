@@ -1,0 +1,56 @@
+# startup_hub/templates/emails/job_alert.txt
+
+{{ site_name }} Job Alert: {{ alert.title }}
+
+Hi {{ user.first_name|default:user.username }},
+
+Great news! We found {{ total_jobs }} new job{% if total_jobs != 1 %}s{% endif %} that match your alert "{{ alert.title }}":
+
+{% for job in jobs %}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{ job.title }}
+{{ job.startup.name }}
+
+📍 Location: {{ job.location }}{% if job.is_remote %} (Remote Available){% endif %}
+{% if job.salary_range %}💰 Salary: {{ job.salary_range }}{% endif %}
+⏰ Posted: {{ job.posted_ago }}
+{% if job.is_urgent %}🚨 URGENT HIRING{% endif %}
+
+{{ job.description|truncatewords:50 }}
+
+{% if job.skills.all %}Skills: {% for skill in job.skills.all %}{{ skill.skill }}{% if not forloop.last %}, {% endif %}{% endfor %}{% endif %}
+
+View full details: {{ dashboard_url }}/jobs/{{ job.id }}
+
+{% endfor %}
+
+{% if total_jobs > jobs|length %}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{ total_jobs|add:jobs|length|add:"-"|add:jobs|length }} MORE JOBS AVAILABLE
+
+Don't miss out on other opportunities that match your criteria.
+View all {{ total_jobs }} jobs: {{ dashboard_url }}/jobs?alert={{ alert.id }}
+
+{% endif %}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MANAGE YOUR JOB ALERTS
+
+You're receiving this because you set up a job alert for "{{ alert.title }}".
+You can modify your alert settings or create new ones in your dashboard.
+
+• Manage Alerts: {{ dashboard_url }}/settings/alerts
+• Browse All Jobs: {{ dashboard_url }}/jobs
+• Visit Dashboard: {{ dashboard_url }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{ site_name }} - Connecting talent with innovative startups
+
+This alert was sent to {{ user.email }}.
+If you no longer wish to receive job alerts, unsubscribe here: {{ unsubscribe_url }}
+
+Manage all your alert preferences: {{ dashboard_url }}/settings/alerts
