@@ -1,3 +1,4 @@
+# startup_hub/startup_hub/settings.py - Fixed version
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -16,7 +17,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'corsheaders',
-    'django_filters',  # For advanced filtering
     # Local apps
     'apps.core',
     'apps.users',
@@ -82,7 +82,7 @@ CORS_ALLOW_CREDENTIALS = True
 # For development only (remove in production)
 CORS_ALLOW_ALL_ORIGINS = True
 
-# REST Framework configuration - Enhanced for filtering
+# REST Framework configuration - Simplified to avoid filter issues
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
@@ -92,7 +92,6 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',
     ],
     'DEFAULT_FILTER_BACKENDS': [
-        'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.SearchFilter',
         'rest_framework.filters.OrderingFilter',
     ],
