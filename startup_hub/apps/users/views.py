@@ -357,3 +357,33 @@ def user_stats(request):
         'member_since': user.date_joined.isoformat(),
         'total_activity': total_ratings + total_comments + total_likes
     })
+
+# Add this to apps/users/views.py
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def user_bookmarks(request):
+    """Get user's bookmarked startups with full startup data"""
+    user = request.user
+    
+    # Get bookmarked startup IDs
+    bookmarked_ids = user.startupbookmark_set.values_list('startup_id', flat=True)
+    
+    # Get the actual startup objects with all related data
+    from apps.startups.models import Startup
+    from apps.startups.serializers import StartupListSerializer
+    
+    bookmarked_startups = Startup.objects.filter(
+        id__in=bookmarked_ids
+    ).select_related('industry').prefetch_related(
+        'tags', 'ratings', 'bookmarks', 'likes', 'founders'
+    ).order_by('-bookmarks__created_at')
+    
+    # Use the same serializer as the startups list for consistency
+    serializer = StartupListSerializer(
+        bookmarked_startups, 
+        many=True, 
+        context={'request': request}
+    )
+    
+    return Response(serializer.data)
