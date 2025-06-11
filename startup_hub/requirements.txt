@@ -1,7 +1,17 @@
+# startup_hub/requirements.txt - Fixed with compatible versions
 asgiref==3.8.1
 Django==5.2.1
 django-cors-headers==4.7.0
 djangorestframework==3.16.0
-django-filter==23.1
+django-filter==24.2
 sqlparse==0.5.3
 tzdata==2025.2
+
+# Additional packages for enhanced functionality
+django-extensions==3.2.3
+pillow==10.0.0
+python-decouple==3.8
+redis==5.0.1
+celery==5.3.4
+channels==4.0.0
+channels-redis==4.2.0
