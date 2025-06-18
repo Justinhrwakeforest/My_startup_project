@@ -1,5 +1,6 @@
-# startup_hub/startup_hub/settings.py - Fixed version
+# startup_hub/startup_hub/settings.py - Updated with startup upload features
 from pathlib import Path
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -17,6 +18,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'corsheaders',
+    'django_filters',  # Add this for filtering support
     # Local apps
     'apps.core',
     'apps.users',
@@ -69,6 +71,15 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
+# Media files configuration for file uploads
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# File upload settings
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
+FILE_UPLOAD_PERMISSIONS = 0o644
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS settings
@@ -82,7 +93,13 @@ CORS_ALLOW_CREDENTIALS = True
 # For development only (remove in production)
 CORS_ALLOW_ALL_ORIGINS = True
 
-# REST Framework configuration - Simplified to avoid filter issues
+# CSRF settings
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# REST Framework configuration - Updated with django-filter support
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
@@ -92,6 +109,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',
     ],
     'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
         'rest_framework.filters.SearchFilter',
         'rest_framework.filters.OrderingFilter',
     ],
@@ -110,13 +128,69 @@ REST_FRAMEWORK = {
 # Make sure you have this
 AUTH_USER_MODEL = 'users.User'
 
+# Email Configuration
+# For development, use console backend to see emails in console
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# For production, uncomment and configure SMTP:
+# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+# EMAIL_HOST = 'smtp.gmail.com'
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True
+# EMAIL_HOST_USER = 'your-email@gmail.com'
+# EMAIL_HOST_PASSWORD = 'your-app-password'
+
+# Email addresses
+DEFAULT_FROM_EMAIL = 'StartupHub <noreply@startuphub.com>'
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+
+# Frontend URL for email links
+FRONTEND_URL = 'http://localhost:3000'
+
+# Startup submission settings
+STARTUP_SUBMISSION_SETTINGS = {
+    'AUTO_APPROVE': False,  # Set to True to auto-approve submissions
+    'REQUIRE_REVIEW': True,  # Require admin review before publishing
+    'MAX_FOUNDERS_PER_STARTUP': 5,
+    'MAX_TAGS_PER_STARTUP': 10,
+    'MAX_DESCRIPTION_LENGTH': 2000,
+    'MIN_DESCRIPTION_LENGTH': 50,
+    'FEATURED_REQUIRES_APPROVAL': True,  # Featured status requires admin approval
+    'SEND_EMAIL_NOTIFICATIONS': True,  # Send email notifications to admins
+}
+
+# Caching configuration (optional, for better performance)
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'unique-snowflake',
+    }
+}
+
 # Logging configuration for debugging
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'logs' / 'django.log',
+            'formatter': 'verbose',
         },
     },
     'root': {
@@ -129,49 +203,26 @@ LOGGING = {
             'level': 'DEBUG' if DEBUG else 'INFO',
             'propagate': False,
         },
+        'apps.startups': {
+            'handlers': ['console', 'file'] if os.path.exists(BASE_DIR / 'logs') else ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
     },
 }
 
-# Add these settings to startup_hub/startup_hub/settings.py
-
-# Email Configuration
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-
-# For development, you can use console backend to see emails in console
-# EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-
-# SMTP Configuration (example for Gmail)
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'your-email@gmail.com'  # Your email
-EMAIL_HOST_PASSWORD = 'your-app-password'  # Your app password
-
-# For other email services:
-# SendGrid:
-# EMAIL_HOST = 'smtp.sendgrid.net'
-# EMAIL_PORT = 587
-# EMAIL_USE_TLS = True
-# EMAIL_HOST_USER = 'apikey'
-# EMAIL_HOST_PASSWORD = 'your-sendgrid-api-key'
-
-# Email addresses
-DEFAULT_FROM_EMAIL = 'StartupHub <noreply@startuphub.com>'
-SERVER_EMAIL = DEFAULT_FROM_EMAIL
-
-# Frontend URL for email links
-FRONTEND_URL = 'http://localhost:3000'  # Change to your frontend URL
+# Create logs directory if it doesn't exist
+os.makedirs(BASE_DIR / 'logs', exist_ok=True)
 
 # Job Alert Settings
 JOB_ALERT_FROM_EMAIL = DEFAULT_FROM_EMAIL
-JOB_ALERT_BATCH_SIZE = 100  # Number of alerts to process in one batch
-JOB_ALERT_MAX_JOBS_PER_EMAIL = 10  # Maximum jobs to include in one email
+JOB_ALERT_BATCH_SIZE = 100
+JOB_ALERT_MAX_JOBS_PER_EMAIL = 10
 
-# Celery Configuration (for background tasks)
-# Uncomment if you want to use Celery for sending emails asynchronously
-# CELERY_BROKER_URL = 'redis://localhost:6379'
-# CELERY_RESULT_BACKEND = 'redis://localhost:6379'
-# CELERY_ACCEPT_CONTENT = ['application/json']
-# CELERY_TASK_SERIALIZER = 'json'
-# CELERY_RESULT_SERIALIZER = 'json'
-# CELERY_TIMEZONE = TIME_ZONE
+# Security settings for production (commented out for development)
+# SECURE_BROWSER_XSS_FILTER = True
+# SECURE_CONTENT_TYPE_NOSNIFF = True
+# SECURE_HSTS_SECONDS = 31536000
+# SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+# SECURE_HSTS_PRELOAD = True
+# X_FRAME_OPTIONS = 'DENY'
