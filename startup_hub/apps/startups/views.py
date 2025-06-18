@@ -1,4 +1,4 @@
-# apps/startups/views.py - Fixed version with proper bookmark handling
+# apps/startups/views.py - Fixed version with proper imports and is_approved filtering
 
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
@@ -21,7 +21,7 @@ class IndustryViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = IndustrySerializer
 
 class StartupViewSet(viewsets.ModelViewSet):
-    queryset = Startup.objects.all().select_related('industry').prefetch_related(
+    queryset = Startup.objects.filter(is_approved=True).select_related('industry').prefetch_related(
         'founders', 'tags', 'ratings', 'comments', 'likes', 'bookmarks'
     )
     permission_classes = [IsAuthenticatedOrReadOnly]
@@ -125,9 +125,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             'ratings__user',
             'comments__user',
             'likes__user',
-            'bookmarks__user',
-            'jobs__job_type',
-            'jobs__skills'
+            'bookmarks__user'
         ).get(pk=instance.pk)
         
         serializer = self.get_serializer(optimized_instance)
@@ -156,17 +154,18 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def filters(self, request):
         """Get available filter options"""
-        # Get all industries with startup counts
+        # Get all industries with startup counts (only for approved startups)
         industries = Industry.objects.annotate(
-            startup_count=Count('startups')
+            startup_count=Count('startups', filter=Q(startups__is_approved=True))
         ).filter(startup_count__gt=0).order_by('name')
         
-        # Get location options
-        locations = Startup.objects.values_list('location', flat=True).distinct().order_by('location')
+        # Get location options (only from approved startups)
+        locations = Startup.objects.filter(is_approved=True).values_list('location', flat=True).distinct().order_by('location')
         
-        # Get popular tags
-        popular_tags = Startup.objects.values_list('tags__tag', flat=True).annotate(
-            count=Count('tags__tag')
+        # Get popular tags (only from approved startups)
+        from django.db.models import Count as DBCount
+        popular_tags = Startup.objects.filter(is_approved=True).values_list('tags__tag', flat=True).annotate(
+            count=DBCount('tags__tag')
         ).order_by('-count')[:20]
         
         # Get employee count ranges
@@ -178,15 +177,18 @@ class StartupViewSet(viewsets.ModelViewSet):
             {'label': '500+', 'min': 500, 'max': None},
         ]
         
+        # Get founded year range (only from approved startups)
+        year_range = Startup.objects.filter(is_approved=True).aggregate(
+            min_year=Min('founded_year'),
+            max_year=Max('founded_year')
+        )
+        
         return Response({
             'industries': IndustrySerializer(industries, many=True).data,
             'locations': [loc for loc in locations if loc],
             'popular_tags': [tag for tag in popular_tags if tag],
             'employee_ranges': employee_ranges,
-            'founded_year_range': {
-                'min': Startup.objects.aggregate(min_year=Min('founded_year'))['min_year'],
-                'max': Startup.objects.aggregate(max_year=Max('founded_year'))['max_year']
-            }
+            'founded_year_range': year_range
         })
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
@@ -322,7 +324,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         # Get bookmarked startup IDs
         bookmarked_ids = request.user.startupbookmark_set.values_list('startup_id', flat=True)
         
-        # Get the actual startup objects
+        # Get the actual startup objects (only approved ones)
         bookmarked_startups = self.get_queryset().filter(id__in=bookmarked_ids).order_by('-bookmarks__created_at')
         
         # Apply pagination
