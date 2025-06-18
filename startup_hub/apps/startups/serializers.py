@@ -1,4 +1,4 @@
-# apps/startups/serializers.py - Updated with proper bookmark handling
+# startup_hub/apps/startups/serializers.py - Fixed with correct order
 
 from rest_framework import serializers
 from .models import Industry, Startup, StartupFounder, StartupTag, StartupRating, StartupComment, StartupBookmark, StartupLike
@@ -39,6 +39,7 @@ class StartupCommentSerializer(serializers.ModelSerializer):
         fields = ['id', 'user', 'user_name', 'text', 'likes', 'created_at']
         read_only_fields = ['user', 'likes', 'created_at']
 
+# Base list serializer - MUST come before DetailSerializer
 class StartupListSerializer(serializers.ModelSerializer):
     industry_name = serializers.CharField(source='industry.name', read_only=True)
     industry_icon = serializers.CharField(source='industry.icon', read_only=True)
@@ -58,7 +59,8 @@ class StartupListSerializer(serializers.ModelSerializer):
             'location', 'website', 'logo', 'funding_amount', 'valuation', 'employee_count',
             'founded_year', 'is_featured', 'revenue', 'user_count', 'growth_rate',
             'views', 'average_rating', 'total_ratings', 'is_bookmarked', 'is_liked',
-            'tags_list', 'created_at', 'total_likes', 'total_bookmarks', 'total_comments'
+            'tags_list', 'created_at', 'total_likes', 'total_bookmarks', 'total_comments',
+            'cover_image_url'
         ]
     
     def get_is_bookmarked(self, obj):
@@ -137,6 +139,158 @@ class StartupCommentDetailSerializer(serializers.ModelSerializer):
         else:
             return f"{diff.seconds // 60} minutes ago"
 
+# Startup creation serializer
+class StartupCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating new startups"""
+    founders = serializers.ListField(
+        child=serializers.DictField(), 
+        write_only=True, 
+        required=False,
+        help_text="List of founder objects with name, title, and bio"
+    )
+    tags = serializers.ListField(
+        child=serializers.CharField(max_length=30), 
+        write_only=True, 
+        required=False,
+        help_text="List of tag strings"
+    )
+    
+    class Meta:
+        model = Startup
+        fields = [
+            'name', 'description', 'industry', 'location', 'website', 'logo',
+            'funding_amount', 'valuation', 'employee_count', 'founded_year',
+            'revenue', 'user_count', 'growth_rate', 'cover_image_url', 
+            'is_featured', 'founders', 'tags'
+        ]
+        extra_kwargs = {
+            'name': {'required': True},
+            'description': {'required': True},
+            'industry': {'required': True},
+            'location': {'required': True},
+            'employee_count': {'required': True},
+            'founded_year': {'required': True},
+        }
+    
+    def validate_name(self, value):
+        """Validate startup name"""
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError("Name must be at least 2 characters long")
+        if len(value) > 100:
+            raise serializers.ValidationError("Name must be less than 100 characters")
+        return value.strip()
+    
+    def validate_description(self, value):
+        """Validate description"""
+        if len(value.strip()) < 50:
+            raise serializers.ValidationError("Description must be at least 50 characters long")
+        if len(value) > 2000:
+            raise serializers.ValidationError("Description must be less than 2000 characters")
+        return value.strip()
+    
+    def validate_employee_count(self, value):
+        """Validate employee count"""
+        if value < 1:
+            raise serializers.ValidationError("Employee count must be at least 1")
+        if value > 100000:
+            raise serializers.ValidationError("Employee count seems unrealistic")
+        return value
+    
+    def validate_founded_year(self, value):
+        """Validate founded year"""
+        from datetime import datetime
+        current_year = datetime.now().year
+        
+        if value < 1800:
+            raise serializers.ValidationError("Founded year seems too early")
+        if value > current_year:
+            raise serializers.ValidationError("Founded year cannot be in the future")
+        return value
+    
+    def validate_website(self, value):
+        """Validate website URL"""
+        if value and not value.startswith(('http://', 'https://')):
+            return f'https://{value}'
+        return value
+    
+    def validate_founders(self, value):
+        """Validate founders list"""
+        if not value:
+            return value
+            
+        valid_founders = []
+        for founder_data in value:
+            if not isinstance(founder_data, dict):
+                raise serializers.ValidationError("Each founder must be an object")
+            
+            name = founder_data.get('name', '').strip()
+            if not name:
+                continue  # Skip empty founders
+                
+            if len(name) > 100:
+                raise serializers.ValidationError("Founder name too long")
+            
+            title = founder_data.get('title', 'Founder').strip()
+            bio = founder_data.get('bio', '').strip()
+            
+            if len(title) > 100:
+                raise serializers.ValidationError("Founder title too long")
+            if len(bio) > 500:
+                raise serializers.ValidationError("Founder bio too long")
+            
+            valid_founders.append({
+                'name': name,
+                'title': title,
+                'bio': bio
+            })
+        
+        if not valid_founders:
+            raise serializers.ValidationError("At least one founder is required")
+        
+        if len(valid_founders) > 5:
+            raise serializers.ValidationError("Maximum 5 founders allowed")
+        
+        return valid_founders
+    
+    def validate_tags(self, value):
+        """Validate tags list"""
+        if not value:
+            return []
+            
+        valid_tags = []
+        for tag in value:
+            tag = tag.strip()
+            if not tag:
+                continue
+            if len(tag) > 30:
+                raise serializers.ValidationError("Tag too long (max 30 characters)")
+            if tag not in valid_tags:  # Avoid duplicates
+                valid_tags.append(tag)
+        
+        if len(valid_tags) > 10:
+            raise serializers.ValidationError("Maximum 10 tags allowed")
+        
+        return valid_tags
+    
+    def create(self, validated_data):
+        """Create startup with founders and tags"""
+        founders_data = validated_data.pop('founders', [])
+        tags_data = validated_data.pop('tags', [])
+        
+        # Create the startup
+        startup = Startup.objects.create(**validated_data)
+        
+        # Create founders
+        for founder_data in founders_data:
+            StartupFounder.objects.create(startup=startup, **founder_data)
+        
+        # Create tags
+        for tag in tags_data:
+            StartupTag.objects.create(startup=startup, tag=tag)
+        
+        return startup
+
+# Detail serializer - NOW comes after StartupListSerializer
 class StartupDetailSerializer(StartupListSerializer):
     """Comprehensive startup detail serializer"""
     industry_detail = serializers.SerializerMethodField()
