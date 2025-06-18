@@ -1,9 +1,9 @@
-# apps/startups/views.py - Fixed version with proper imports and is_approved filtering
+# apps/startups/views.py - Fixed version with startup creation support
 
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticatedOrReadOnly
+from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Avg, Count, Case, When, IntegerField, Min, Max
 from django.db import models
@@ -13,7 +13,7 @@ from django.core.paginator import Paginator
 from .models import Industry, Startup, StartupRating, StartupComment, StartupBookmark, StartupLike
 from .serializers import (
     IndustrySerializer, StartupListSerializer, StartupDetailSerializer,
-    StartupRatingDetailSerializer, StartupCommentDetailSerializer
+    StartupRatingDetailSerializer, StartupCommentDetailSerializer, StartupCreateSerializer
 )
 
 class IndustryViewSet(viewsets.ReadOnlyModelViewSet):
@@ -32,7 +32,17 @@ class StartupViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
     
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # For list/retrieve actions, only show approved startups
+        if self.action in ['list', 'retrieve']:
+            queryset = Startup.objects.filter(is_approved=True)
+        else:
+            # For create/update/delete, show all startups
+            queryset = Startup.objects.all()
+            
+        queryset = queryset.select_related('industry').prefetch_related(
+            'founders', 'tags', 'ratings', 'comments', 'likes', 'bookmarks'
+        )
+        
         params = self.request.query_params
         
         # Check if we want only bookmarked startups
@@ -106,9 +116,40 @@ class StartupViewSet(viewsets.ModelViewSet):
         return queryset
     
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action == 'create':
+            return StartupCreateSerializer
+        elif self.action == 'retrieve':
             return StartupDetailSerializer
         return StartupListSerializer
+    
+    def get_permissions(self):
+        """
+        Instantiate and return the list of permissions that this view requires.
+        """
+        if self.action == 'create':
+            # Require authentication for creating startups
+            permission_classes = [IsAuthenticated]
+        else:
+            permission_classes = [IsAuthenticatedOrReadOnly]
+        
+        return [permission() for permission in permission_classes]
+    
+    def create(self, request, *args, **kwargs):
+        """Create a new startup submission"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Set the submitted_by field to the current user
+        startup = serializer.save(submitted_by=request.user, is_approved=False)
+        
+        # Return the created startup using the detail serializer
+        response_serializer = StartupDetailSerializer(startup, context={'request': request})
+        
+        return Response({
+            'message': 'Startup submitted successfully! It will be reviewed before being published.',
+            'startup': response_serializer.data,
+            'id': startup.id
+        }, status=status.HTTP_201_CREATED)
     
     def retrieve(self, request, *args, **kwargs):
         """Enhanced retrieve method with view tracking and optimized queries"""
