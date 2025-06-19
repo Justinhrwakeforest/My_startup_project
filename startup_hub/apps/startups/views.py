@@ -1,4 +1,4 @@
-# apps/startups/views.py - Fixed version with startup creation support
+# apps/startups/views.py - Updated with admin functionality
 
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
@@ -129,6 +129,9 @@ class StartupViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             # Require authentication for creating startups
             permission_classes = [IsAuthenticated]
+        elif self.action in ['admin_list', 'admin_action', 'bulk_admin']:
+            # Require authentication for admin actions
+            permission_classes = [IsAuthenticated]
         else:
             permission_classes = [IsAuthenticatedOrReadOnly]
         
@@ -231,6 +234,113 @@ class StartupViewSet(viewsets.ModelViewSet):
             'employee_ranges': employee_ranges,
             'founded_year_range': year_range
         })
+    
+    # ==================== ADMIN FUNCTIONALITY ====================
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='admin')
+    def admin_list(self, request):
+        """Get all startups for admin panel (including unapproved ones)"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        filter_type = request.query_params.get('filter', 'all')
+        search = request.query_params.get('search', '')
+        
+        # Get all startups without approval filter for admin
+        queryset = Startup.objects.all().select_related('industry', 'submitted_by').prefetch_related(
+            'founders', 'tags'
+        )
+        
+        # Apply filters
+        if filter_type == 'pending':
+            queryset = queryset.filter(is_approved=False)
+        elif filter_type == 'approved':
+            queryset = queryset.filter(is_approved=True, is_featured=False)
+        elif filter_type == 'featured':
+            queryset = queryset.filter(is_featured=True)
+        
+        # Apply search
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+        
+        # Order by most recent first
+        queryset = queryset.order_by('-created_at')
+        
+        # Paginate results
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = StartupDetailSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupDetailSerializer(queryset, many=True, context={'request': request})
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAuthenticated], url_path='admin')
+    def admin_action(self, request, pk=None):
+        """Admin actions: approve, reject, feature, unfeature"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        startup = self.get_object()
+        action_type = request.data.get('action')
+        
+        if action_type == 'approve':
+            startup.is_approved = True
+            startup.save()
+            return Response({'message': 'Startup approved successfully'})
+        
+        elif action_type == 'reject':
+            startup.is_approved = False
+            startup.is_featured = False  # Remove featured status if rejecting
+            startup.save()
+            return Response({'message': 'Startup rejected successfully'})
+        
+        elif action_type == 'feature':
+            startup.is_approved = True  # Auto-approve when featuring
+            startup.is_featured = True
+            startup.save()
+            return Response({'message': 'Startup featured successfully'})
+        
+        elif action_type == 'unfeature':
+            startup.is_featured = False
+            startup.save()
+            return Response({'message': 'Startup unfeatured successfully'})
+        
+        else:
+            return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='bulk-admin')
+    def bulk_admin(self, request):
+        """Bulk admin actions"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        startup_ids = request.data.get('startup_ids', [])
+        action_type = request.data.get('action')
+        
+        if not startup_ids:
+            return Response({'error': 'No startups selected'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        startups = Startup.objects.filter(id__in=startup_ids)
+        
+        if action_type == 'approve':
+            startups.update(is_approved=True)
+            return Response({'message': f'{startups.count()} startups approved successfully'})
+        
+        elif action_type == 'reject':
+            startups.update(is_approved=False, is_featured=False)
+            return Response({'message': f'{startups.count()} startups rejected successfully'})
+        
+        elif action_type == 'feature':
+            startups.update(is_approved=True, is_featured=True)
+            return Response({'message': f'{startups.count()} startups featured successfully'})
+        
+        else:
+            return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # ==================== END ADMIN FUNCTIONALITY ====================
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
     def rate(self, request, pk=None):
