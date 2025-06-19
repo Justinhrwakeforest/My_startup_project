@@ -1,5 +1,6 @@
-# apps/startups/views.py - Updated with admin functionality
+# apps/startups/views.py - Complete Working Version
 
+import logging
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -16,15 +17,30 @@ from .serializers import (
     StartupRatingDetailSerializer, StartupCommentDetailSerializer, StartupCreateSerializer
 )
 
+# Setup logging
+logger = logging.getLogger(__name__)
+
 class IndustryViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for managing industries"""
     queryset = Industry.objects.all()
     serializer_class = IndustrySerializer
+    
+    def list(self, request, *args, **kwargs):
+        logger.info(f"📋 Industries list requested by user: {request.user}")
+        return super().list(request, *args, **kwargs)
 
 class StartupViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing startups with full CRUD operations"""
+    
+    # Base queryset - only approved startups for public viewing
     queryset = Startup.objects.filter(is_approved=True).select_related('industry').prefetch_related(
         'founders', 'tags', 'ratings', 'comments', 'likes', 'bookmarks'
     )
+    
+    # Permissions
     permission_classes = [IsAuthenticatedOrReadOnly]
+    
+    # Filtering and search
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['industry', 'is_featured', 'founded_year', 'location']
     search_fields = ['name', 'description', 'tags__tag', 'location', 'founders__name']
@@ -32,11 +48,12 @@ class StartupViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
     
     def get_queryset(self):
+        """Get queryset based on action and filters"""
         # For list/retrieve actions, only show approved startups
         if self.action in ['list', 'retrieve']:
             queryset = Startup.objects.filter(is_approved=True)
         else:
-            # For create/update/delete, show all startups
+            # For create/update/delete, show all startups (with proper permissions)
             queryset = Startup.objects.all()
             
         queryset = queryset.select_related('industry').prefetch_related(
@@ -116,6 +133,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         return queryset
     
     def get_serializer_class(self):
+        """Return appropriate serializer based on action"""
         if self.action == 'create':
             return StartupCreateSerializer
         elif self.action == 'retrieve':
@@ -123,9 +141,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         return StartupListSerializer
     
     def get_permissions(self):
-        """
-        Instantiate and return the list of permissions that this view requires.
-        """
+        """Return appropriate permissions based on action"""
         if self.action == 'create':
             # Require authentication for creating startups
             permission_classes = [IsAuthenticated]
@@ -139,52 +155,99 @@ class StartupViewSet(viewsets.ModelViewSet):
     
     def create(self, request, *args, **kwargs):
         """Create a new startup submission"""
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        logger.info(f"🚀 Creating new startup by user: {request.user}")
         
-        # Set the submitted_by field to the current user
-        startup = serializer.save(submitted_by=request.user, is_approved=False)
+        # Check if user is authenticated
+        if not request.user.is_authenticated:
+            logger.warning(f"❌ Unauthenticated user attempted to create startup")
+            return Response({'error': 'Authentication required'}, 
+                           status=status.HTTP_401_UNAUTHORIZED)
         
-        # Return the created startup using the detail serializer
-        response_serializer = StartupDetailSerializer(startup, context={'request': request})
-        
-        return Response({
-            'message': 'Startup submitted successfully! It will be reviewed before being published.',
-            'startup': response_serializer.data,
-            'id': startup.id
-        }, status=status.HTTP_201_CREATED)
+        try:
+            # Log the incoming data (without sensitive info)
+            logger.info(f"📝 Received data keys: {list(request.data.keys())}")
+            
+            # Validate data using serializer
+            serializer = self.get_serializer(data=request.data)
+            if not serializer.is_valid():
+                logger.warning(f"❌ Validation errors: {serializer.errors}")
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Save the startup with the current user as submitter
+            # Note: is_approved=False by default (set in serializer)
+            startup = serializer.save(submitted_by=request.user, is_approved=False)
+            
+            # Return the created startup using the detail serializer
+            response_serializer = StartupDetailSerializer(startup, context={'request': request})
+            
+            logger.info(f"✅ Startup created successfully: {startup.name} (ID: {startup.id})")
+            
+            return Response({
+                'message': 'Startup submitted successfully! It will be reviewed before being published.',
+                'startup': response_serializer.data,
+                'id': startup.id,
+                'success': True
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating startup: {str(e)}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return Response({
+                'error': 'Failed to create startup. Please try again.',
+                'detail': str(e) if settings.DEBUG else 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     def retrieve(self, request, *args, **kwargs):
-        """Enhanced retrieve method with view tracking and optimized queries"""
-        instance = self.get_object()
+        """Enhanced retrieve method with view tracking"""
+        logger.info(f"👁️ Retrieving startup {kwargs.get('pk')} for user: {request.user}")
         
-        # Increment views (you might want to implement IP-based or user-based view tracking)
-        instance.views += 1
-        instance.save(update_fields=['views'])
-        
-        # Use optimized queryset for detail view
-        optimized_instance = Startup.objects.select_related('industry').prefetch_related(
-            'founders',
-            'tags',
-            'ratings__user',
-            'comments__user',
-            'likes__user',
-            'bookmarks__user'
-        ).get(pk=instance.pk)
-        
-        serializer = self.get_serializer(optimized_instance)
-        return Response(serializer.data)
+        try:
+            instance = self.get_object()
+            
+            # Increment views (basic implementation - could be improved with IP tracking)
+            instance.views += 1
+            instance.save(update_fields=['views'])
+            
+            # Use optimized queryset for detail view
+            optimized_instance = Startup.objects.select_related('industry').prefetch_related(
+                'founders',
+                'tags',
+                'ratings__user',
+                'comments__user',
+                'likes__user',
+                'bookmarks__user'
+            ).get(pk=instance.pk)
+            
+            serializer = self.get_serializer(optimized_instance)
+            logger.info(f"✅ Startup retrieved successfully: {instance.name}")
+            return Response(serializer.data)
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving startup: {str(e)}")
+            return Response({'error': 'Startup not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # ==================== CUSTOM LIST ACTIONS ====================
     
     @action(detail=False, methods=['get'])
     def featured(self, request):
         """Get featured startups"""
+        logger.info(f"⭐ Featured startups requested by user: {request.user}")
         featured_startups = self.get_queryset().filter(is_featured=True)
+        
+        page = self.paginate_queryset(featured_startups)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
         serializer = self.get_serializer(featured_startups, many=True)
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def trending(self, request):
         """Get trending startups based on recent activity"""
+        logger.info(f"📈 Trending startups requested by user: {request.user}")
+        
         # Get startups with recent activity (views, ratings, comments, likes)
         trending_startups = self.get_queryset().annotate(
             recent_activity=Count('ratings', filter=Q(ratings__created_at__gte=timezone.now() - timedelta(days=7))) +
@@ -198,6 +261,8 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def filters(self, request):
         """Get available filter options"""
+        logger.info(f"🔍 Filter options requested by user: {request.user}")
+        
         # Get all industries with startup counts (only for approved startups)
         industries = Industry.objects.annotate(
             startup_count=Count('startups', filter=Q(startups__is_approved=True))
@@ -235,13 +300,191 @@ class StartupViewSet(viewsets.ModelViewSet):
             'founded_year_range': year_range
         })
     
+    # ==================== INTERACTION ACTIONS ====================
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def rate(self, request, pk=None):
+        """Rate a startup (1-5 stars)"""
+        logger.info(f"⭐ Rating startup {pk} by user: {request.user}")
+        
+        startup = self.get_object()
+        rating_value = request.data.get('rating')
+        
+        # Validate rating
+        try:
+            rating_value = int(rating_value)
+            if not (1 <= rating_value <= 5):
+                logger.warning(f"❌ Invalid rating value: {rating_value}")
+                return Response({'error': 'Rating must be between 1 and 5'}, 
+                              status=status.HTTP_400_BAD_REQUEST)
+        except (ValueError, TypeError):
+            logger.warning(f"❌ Invalid rating format: {rating_value}")
+            return Response({'error': 'Invalid rating value'}, 
+                          status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            rating, created = StartupRating.objects.update_or_create(
+                startup=startup, user=request.user,
+                defaults={'rating': rating_value}
+            )
+            
+            action_text = 'created' if created else 'updated'
+            
+            # Return updated startup metrics
+            startup.refresh_from_db()
+            
+            logger.info(f"✅ Rating {action_text} successfully: {rating_value}/5 for {startup.name}")
+            
+            return Response({
+                'message': f'Rating {action_text} successfully',
+                'rating': rating_value,
+                'average_rating': startup.average_rating,
+                'total_ratings': startup.total_ratings,
+                'user_rating': rating_value
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving rating: {str(e)}")
+            return Response({'error': 'Failed to save rating'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def comment(self, request, pk=None):
+        """Add a comment to a startup"""
+        logger.info(f"💬 Adding comment to startup {pk} by user: {request.user}")
+        
+        startup = self.get_object()
+        text = request.data.get('text', '').strip()
+        
+        if not text:
+            logger.warning(f"❌ Empty comment attempted by user: {request.user}")
+            return Response({'error': 'Comment text is required'}, 
+                          status=status.HTTP_400_BAD_REQUEST)
+        
+        if len(text) > 1000:
+            logger.warning(f"❌ Comment too long: {len(text)} characters")
+            return Response({'error': 'Comment too long (max 1000 characters)'}, 
+                          status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            comment = StartupComment.objects.create(
+                startup=startup, user=request.user, text=text
+            )
+            
+            serializer = StartupCommentDetailSerializer(comment)
+            logger.info(f"✅ Comment added successfully to {startup.name}")
+            
+            return Response({
+                'message': 'Comment added successfully',
+                'comment': serializer.data
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving comment: {str(e)}")
+            return Response({'error': 'Failed to save comment'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def bookmark(self, request, pk=None):
+        """Bookmark/unbookmark a startup"""
+        logger.info(f"🔖 Toggling bookmark for startup {pk} by user: {request.user}")
+        
+        startup = self.get_object()
+        
+        try:
+            bookmark = StartupBookmark.objects.get(startup=startup, user=request.user)
+            # Bookmark exists, so remove it
+            bookmark.delete()
+            bookmarked = False
+            message = 'Bookmark removed successfully'
+            logger.info(f"🗑️ Bookmark removed for {startup.name} by {request.user}")
+        except StartupBookmark.DoesNotExist:
+            # Bookmark doesn't exist, so create it
+            StartupBookmark.objects.create(startup=startup, user=request.user)
+            bookmarked = True
+            message = 'Startup bookmarked successfully'
+            logger.info(f"✅ Bookmark added for {startup.name} by {request.user}")
+        except Exception as e:
+            logger.error(f"❌ Error toggling bookmark: {str(e)}")
+            return Response({'error': 'Failed to update bookmark'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # Get updated bookmark count
+        total_bookmarks = startup.bookmarks.count()
+        
+        return Response({
+            'bookmarked': bookmarked,
+            'message': message,
+            'total_bookmarks': total_bookmarks,
+            'startup_id': startup.id,
+            'success': True
+        })
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def like(self, request, pk=None):
+        """Like/unlike a startup"""
+        logger.info(f"❤️ Toggling like for startup {pk} by user: {request.user}")
+        
+        startup = self.get_object()
+        
+        try:
+            like = StartupLike.objects.get(startup=startup, user=request.user)
+            # Like exists, so remove it
+            like.delete()
+            liked = False
+            message = 'Like removed successfully'
+            logger.info(f"💔 Like removed for {startup.name} by {request.user}")
+        except StartupLike.DoesNotExist:
+            # Like doesn't exist, so create it
+            StartupLike.objects.create(startup=startup, user=request.user)
+            liked = True
+            message = 'Startup liked successfully'
+            logger.info(f"❤️ Like added for {startup.name} by {request.user}")
+        except Exception as e:
+            logger.error(f"❌ Error toggling like: {str(e)}")
+            return Response({'error': 'Failed to update like'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # Get updated like count
+        total_likes = startup.likes.count()
+        
+        return Response({
+            'liked': liked,
+            'message': message,
+            'total_likes': total_likes,
+            'startup_id': startup.id
+        })
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def bookmarked(self, request):
+        """Get user's bookmarked startups"""
+        logger.info(f"🔖 Getting bookmarked startups for user: {request.user}")
+        
+        # Get bookmarked startup IDs
+        bookmarked_ids = request.user.startupbookmark_set.values_list('startup_id', flat=True)
+        
+        # Get the actual startup objects (only approved ones)
+        bookmarked_startups = self.get_queryset().filter(id__in=bookmarked_ids).order_by('-bookmarks__created_at')
+        
+        # Apply pagination
+        page = self.paginate_queryset(bookmarked_startups)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(bookmarked_startups, many=True)
+        return Response(serializer.data)
+    
     # ==================== ADMIN FUNCTIONALITY ====================
     
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='admin')
     def admin_list(self, request):
         """Get all startups for admin panel (including unapproved ones)"""
         if not (request.user.is_staff or request.user.is_superuser):
+            logger.warning(f"🚫 Non-admin user {request.user} attempted to access admin panel")
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        logger.info(f"👑 Admin panel accessed by: {request.user}")
         
         filter_type = request.query_params.get('filter', 'all')
         search = request.query_params.get('search', '')
@@ -281,208 +524,111 @@ class StartupViewSet(viewsets.ModelViewSet):
     def admin_action(self, request, pk=None):
         """Admin actions: approve, reject, feature, unfeature"""
         if not (request.user.is_staff or request.user.is_superuser):
+            logger.warning(f"🚫 Non-admin user {request.user} attempted admin action")
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
         startup = self.get_object()
         action_type = request.data.get('action')
         
-        if action_type == 'approve':
-            startup.is_approved = True
-            startup.save()
-            return Response({'message': 'Startup approved successfully'})
+        logger.info(f"👑 Admin action '{action_type}' on startup {startup.name} by {request.user}")
         
-        elif action_type == 'reject':
-            startup.is_approved = False
-            startup.is_featured = False  # Remove featured status if rejecting
-            startup.save()
-            return Response({'message': 'Startup rejected successfully'})
-        
-        elif action_type == 'feature':
-            startup.is_approved = True  # Auto-approve when featuring
-            startup.is_featured = True
-            startup.save()
-            return Response({'message': 'Startup featured successfully'})
-        
-        elif action_type == 'unfeature':
-            startup.is_featured = False
-            startup.save()
-            return Response({'message': 'Startup unfeatured successfully'})
-        
-        else:
-            return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            if action_type == 'approve':
+                startup.is_approved = True
+                startup.save(update_fields=['is_approved'])
+                return Response({'message': 'Startup approved successfully'})
+            
+            elif action_type == 'reject':
+                startup.is_approved = False
+                startup.is_featured = False  # Remove featured status if rejecting
+                startup.save(update_fields=['is_approved', 'is_featured'])
+                return Response({'message': 'Startup rejected successfully'})
+            
+            elif action_type == 'feature':
+                startup.is_approved = True  # Auto-approve when featuring
+                startup.is_featured = True
+                startup.save(update_fields=['is_approved', 'is_featured'])
+                return Response({'message': 'Startup featured successfully'})
+            
+            elif action_type == 'unfeature':
+                startup.is_featured = False
+                startup.save(update_fields=['is_featured'])
+                return Response({'message': 'Startup unfeatured successfully'})
+            
+            else:
+                logger.warning(f"❌ Invalid admin action: {action_type}")
+                return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            logger.error(f"❌ Error performing admin action: {str(e)}")
+            return Response({'error': 'Failed to perform action'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='bulk-admin')
     def bulk_admin(self, request):
         """Bulk admin actions"""
         if not (request.user.is_staff or request.user.is_superuser):
+            logger.warning(f"🚫 Non-admin user {request.user} attempted bulk admin action")
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
         startup_ids = request.data.get('startup_ids', [])
         action_type = request.data.get('action')
         
+        logger.info(f"👑 Bulk admin action '{action_type}' on {len(startup_ids)} startups by {request.user}")
+        
         if not startup_ids:
             return Response({'error': 'No startups selected'}, status=status.HTTP_400_BAD_REQUEST)
         
-        startups = Startup.objects.filter(id__in=startup_ids)
-        
-        if action_type == 'approve':
-            startups.update(is_approved=True)
-            return Response({'message': f'{startups.count()} startups approved successfully'})
-        
-        elif action_type == 'reject':
-            startups.update(is_approved=False, is_featured=False)
-            return Response({'message': f'{startups.count()} startups rejected successfully'})
-        
-        elif action_type == 'feature':
-            startups.update(is_approved=True, is_featured=True)
-            return Response({'message': f'{startups.count()} startups featured successfully'})
-        
-        else:
-            return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # ==================== END ADMIN FUNCTIONALITY ====================
-    
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
-    def rate(self, request, pk=None):
-        """Rate a startup (1-5 stars)"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
-        
-        startup = self.get_object()
-        rating_value = request.data.get('rating')
-        
         try:
-            rating_value = int(rating_value)
-            if not (1 <= rating_value <= 5):
-                return Response({'error': 'Rating must be between 1 and 5'}, 
-                              status=status.HTTP_400_BAD_REQUEST)
-        except (ValueError, TypeError):
-            return Response({'error': 'Invalid rating value'}, 
-                          status=status.HTTP_400_BAD_REQUEST)
-        
-        rating, created = StartupRating.objects.update_or_create(
-            startup=startup, user=request.user,
-            defaults={'rating': rating_value}
-        )
-        
-        action_text = 'created' if created else 'updated'
-        
-        # Return updated startup metrics
-        startup.refresh_from_db()
-        
-        return Response({
-            'message': f'Rating {action_text} successfully',
-            'rating': rating_value,
-            'average_rating': startup.average_rating,
-            'total_ratings': startup.total_ratings,
-            'user_rating': rating_value
-        })
+            startups = Startup.objects.filter(id__in=startup_ids)
+            
+            if action_type == 'approve':
+                updated_count = startups.update(is_approved=True)
+                return Response({'message': f'{updated_count} startups approved successfully'})
+            
+            elif action_type == 'reject':
+                updated_count = startups.update(is_approved=False, is_featured=False)
+                return Response({'message': f'{updated_count} startups rejected successfully'})
+            
+            elif action_type == 'feature':
+                updated_count = startups.update(is_approved=True, is_featured=True)
+                return Response({'message': f'{updated_count} startups featured successfully'})
+            
+            else:
+                logger.warning(f"❌ Invalid bulk admin action: {action_type}")
+                return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            logger.error(f"❌ Error performing bulk admin action: {str(e)}")
+            return Response({'error': 'Failed to perform bulk action'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
-    def comment(self, request, pk=None):
-        """Add a comment to a startup"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
-        
+    # ==================== HELPER METHODS ====================
+    
+    def perform_create(self, serializer):
+        """Called when creating a new startup instance"""
+        # This is called by the DRF create method
+        # We set submitted_by to current user and is_approved to False
+        serializer.save(submitted_by=self.request.user, is_approved=False)
+    
+    def perform_update(self, serializer):
+        """Called when updating a startup instance"""
+        # Only allow the submitter or admin to update
         startup = self.get_object()
-        text = request.data.get('text', '').strip()
+        if not (self.request.user == startup.submitted_by or 
+                self.request.user.is_staff or 
+                self.request.user.is_superuser):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You don't have permission to edit this startup")
         
-        if not text:
-            return Response({'error': 'Comment text is required'}, 
-                          status=status.HTTP_400_BAD_REQUEST)
-        
-        if len(text) > 1000:
-            return Response({'error': 'Comment too long (max 1000 characters)'}, 
-                          status=status.HTTP_400_BAD_REQUEST)
-        
-        comment = StartupComment.objects.create(
-            startup=startup, user=request.user, text=text
-        )
-        
-        serializer = StartupCommentDetailSerializer(comment)
-        return Response({
-            'message': 'Comment added successfully',
-            'comment': serializer.data
-        }, status=status.HTTP_201_CREATED)
+        serializer.save()
     
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
-    def bookmark(self, request, pk=None):
-        """Bookmark/unbookmark a startup"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+    def perform_destroy(self, instance):
+        """Called when deleting a startup instance"""
+        # Only allow the submitter or admin to delete
+        if not (self.request.user == instance.submitted_by or 
+                self.request.user.is_staff or 
+                self.request.user.is_superuser):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You don't have permission to delete this startup")
         
-        startup = self.get_object()
-        
-        try:
-            bookmark = StartupBookmark.objects.get(startup=startup, user=request.user)
-            # Bookmark exists, so remove it
-            bookmark.delete()
-            bookmarked = False
-            message = 'Bookmark removed'
-        except StartupBookmark.DoesNotExist:
-            # Bookmark doesn't exist, so create it
-            StartupBookmark.objects.create(startup=startup, user=request.user)
-            bookmarked = True
-            message = 'Startup bookmarked'
-        
-        # Get updated bookmark count
-        total_bookmarks = startup.bookmarks.count()
-        
-        return Response({
-            'bookmarked': bookmarked,
-            'message': message,
-            'total_bookmarks': total_bookmarks,
-            'startup_id': startup.id,
-            'success': True  # Add this for consistency
-        })
-    
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticatedOrReadOnly])
-    def like(self, request, pk=None):
-        """Like/unlike a startup"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
-        
-        startup = self.get_object()
-        
-        try:
-            like = StartupLike.objects.get(startup=startup, user=request.user)
-            # Like exists, so remove it
-            like.delete()
-            liked = False
-            message = 'Like removed'
-        except StartupLike.DoesNotExist:
-            # Like doesn't exist, so create it
-            StartupLike.objects.create(startup=startup, user=request.user)
-            liked = True
-            message = 'Startup liked'
-        
-        # Get updated like count
-        total_likes = startup.likes.count()
-        
-        return Response({
-            'liked': liked,
-            'message': message,
-            'total_likes': total_likes,
-            'startup_id': startup.id
-        })
-    
-    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticatedOrReadOnly])
-    def bookmarked(self, request):
-        """Get user's bookmarked startups"""
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
-        
-        # Get bookmarked startup IDs
-        bookmarked_ids = request.user.startupbookmark_set.values_list('startup_id', flat=True)
-        
-        # Get the actual startup objects (only approved ones)
-        bookmarked_startups = self.get_queryset().filter(id__in=bookmarked_ids).order_by('-bookmarks__created_at')
-        
-        # Apply pagination
-        page = self.paginate_queryset(bookmarked_startups)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        
-        serializer = self.get_serializer(bookmarked_startups, many=True)
-        return Response(serializer.data)
+        logger.info(f"🗑️ Deleting startup {instance.name} by {self.request.user}")
+        instance.delete()
