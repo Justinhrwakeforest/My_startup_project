@@ -1,6 +1,10 @@
+# startup_hub/apps/startups/models.py - Complete file with edit request functionality
+
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
+import json
 
 User = get_user_model()
 
@@ -14,6 +18,28 @@ class Industry(models.Model):
     
     class Meta:
         verbose_name_plural = "Industries"
+
+class UserProfile(models.Model):
+    """User profile to track premium membership status"""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    is_premium = models.BooleanField(default=False)
+    premium_expires_at = models.DateTimeField(null=True, blank=True)
+    
+    def __str__(self):
+        return f"{self.user.username} - {'Premium' if self.is_premium else 'Free'}"
+    
+    @property
+    def is_premium_active(self):
+        """Check if premium membership is currently active"""
+        if not self.is_premium:
+            return False
+        if self.premium_expires_at and self.premium_expires_at < timezone.now():
+            return False
+        return True
+    
+    class Meta:
+        verbose_name = "User Profile"
+        verbose_name_plural = "User Profiles"
 
 class Startup(models.Model):
     name = models.CharField(max_length=100)
@@ -45,6 +71,12 @@ class Startup(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     views = models.PositiveIntegerField(default=0)
     
+    # Contact information
+    contact_email = models.EmailField(blank=True)
+    contact_phone = models.CharField(max_length=20, blank=True)
+    business_model = models.CharField(max_length=50, blank=True)
+    target_market = models.CharField(max_length=100, blank=True)
+    
     def __str__(self):
         return self.name
     
@@ -59,6 +91,29 @@ class Startup(models.Model):
     def total_ratings(self):
         return self.ratings.count()
     
+    def can_edit(self, user):
+        """Check if user can edit this startup"""
+        if not user.is_authenticated:
+            return False
+        
+        # Admins can always edit
+        if user.is_staff or user.is_superuser:
+            return True
+        
+        # Original submitter can edit if they're premium
+        if self.submitted_by == user:
+            try:
+                profile = user.profile
+                return profile.is_premium_active
+            except UserProfile.DoesNotExist:
+                return False
+        
+        return False
+    
+    def has_pending_edits(self):
+        """Check if there are pending edit requests"""
+        return self.edit_requests.filter(status='pending').exists()
+    
     class Meta:
         ordering = ['-created_at']
         indexes = [
@@ -67,6 +122,87 @@ class Startup(models.Model):
             models.Index(fields=['location', 'is_approved'], name='startups_st_locatio_5f06e2_idx'),
             models.Index(fields=['created_at'], name='startups_st_created_93e688_idx'),
         ]
+
+class StartupEditRequest(models.Model):
+    """Track edit requests from premium members that need admin approval"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    
+    startup = models.ForeignKey(Startup, on_delete=models.CASCADE, related_name='edit_requests')
+    requested_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='startup_edit_requests')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Store the proposed changes as JSON
+    proposed_changes = models.JSONField(help_text='JSON object of field names and new values')
+    
+    # Original values for comparison (stored when request is created)
+    original_values = models.JSONField(help_text='JSON object of field names and original values')
+    
+    # Review information
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_edit_requests')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['startup', 'status']),
+            models.Index(fields=['requested_by', 'created_at']),
+        ]
+    
+    def __str__(self):
+        return f"Edit request for {self.startup.name} by {self.requested_by.username}"
+    
+    def get_changes_display(self):
+        """Get a human-readable display of the changes"""
+        changes = []
+        for field, new_value in self.proposed_changes.items():
+            old_value = self.original_values.get(field, '')
+            if old_value != new_value:
+                changes.append(f"{field}: '{old_value}' → '{new_value}'")
+        return changes
+    
+    def apply_changes(self):
+        """Apply the proposed changes to the startup"""
+        if self.status != 'approved':
+            raise ValueError("Can only apply approved changes")
+        
+        # Apply each field change
+        for field, new_value in self.proposed_changes.items():
+            if hasattr(self.startup, field) and field not in ['id', 'created_at', 'updated_at', 'views']:
+                setattr(self.startup, field, new_value)
+        
+        self.startup.save()
+        return self.startup
+    
+    def approve(self, user):
+        """Approve the edit request and apply changes"""
+        self.status = 'approved'
+        self.reviewed_by = user
+        self.reviewed_at = timezone.now()
+        self.save()
+        
+        # Apply the changes
+        self.apply_changes()
+        
+        return self
+    
+    def reject(self, user, notes=''):
+        """Reject the edit request"""
+        self.status = 'rejected'
+        self.reviewed_by = user
+        self.reviewed_at = timezone.now()
+        self.review_notes = notes
+        self.save()
+        return self
 
 class StartupSubmission(models.Model):
     STATUS_CHOICES = [
