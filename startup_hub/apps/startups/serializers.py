@@ -1,7 +1,13 @@
-# startup_hub/apps/startups/serializers.py - Fixed with correct order
+# startup_hub/apps/startups/serializers.py - Complete file with edit request functionality
 
 from rest_framework import serializers
-from .models import Industry, Startup, StartupFounder, StartupTag, StartupRating, StartupComment, StartupBookmark, StartupLike
+from django.contrib.auth import get_user_model
+from .models import (
+    Industry, Startup, StartupFounder, StartupTag, StartupRating, 
+    StartupComment, StartupBookmark, StartupLike, UserProfile, StartupEditRequest
+)
+
+User = get_user_model()
 
 class IndustrySerializer(serializers.ModelSerializer):
     startup_count = serializers.SerializerMethodField()
@@ -12,6 +18,13 @@ class IndustrySerializer(serializers.ModelSerializer):
     
     def get_startup_count(self, obj):
         return obj.startups.count()
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    is_premium_active = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = UserProfile
+        fields = ['is_premium', 'premium_expires_at', 'is_premium_active']
 
 class StartupFounderSerializer(serializers.ModelSerializer):
     class Meta:
@@ -51,6 +64,8 @@ class StartupListSerializer(serializers.ModelSerializer):
     total_likes = serializers.SerializerMethodField()
     total_bookmarks = serializers.SerializerMethodField()
     total_comments = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    has_pending_edits = serializers.SerializerMethodField()
     
     class Meta:
         model = Startup
@@ -60,7 +75,8 @@ class StartupListSerializer(serializers.ModelSerializer):
             'founded_year', 'is_featured', 'revenue', 'user_count', 'growth_rate',
             'views', 'average_rating', 'total_ratings', 'is_bookmarked', 'is_liked',
             'tags_list', 'created_at', 'total_likes', 'total_bookmarks', 'total_comments',
-            'cover_image_url'
+            'cover_image_url', 'can_edit', 'has_pending_edits', 'is_approved',
+            'contact_email', 'contact_phone', 'business_model', 'target_market'
         ]
     
     def get_is_bookmarked(self, obj):
@@ -83,13 +99,22 @@ class StartupListSerializer(serializers.ModelSerializer):
     
     def get_total_comments(self, obj):
         return obj.comments.count()
+    
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.can_edit(request.user)
+        return False
+    
+    def get_has_pending_edits(self, obj):
+        return obj.has_pending_edits()
 
 # Detailed serializers for startup detail page
 class StartupFounderDetailSerializer(serializers.ModelSerializer):
     """Detailed founder information for startup detail page"""
     class Meta:
         model = StartupFounder
-        fields = ['id', 'name', 'title', 'bio']
+        fields = ['id', 'name', 'title', 'bio', 'linkedin_url', 'twitter_url']
 
 class StartupTagDetailSerializer(serializers.ModelSerializer):
     """Tag information for startup detail page"""
@@ -139,6 +164,53 @@ class StartupCommentDetailSerializer(serializers.ModelSerializer):
         else:
             return f"{diff.seconds // 60} minutes ago"
 
+# Edit Request Serializers
+class StartupEditRequestSerializer(serializers.ModelSerializer):
+    """Serializer for creating edit requests"""
+    changes_display = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = StartupEditRequest
+        fields = [
+            'id', 'startup', 'requested_by', 'status', 'proposed_changes',
+            'original_values', 'changes_display', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'requested_by', 'status', 'original_values', 'created_at', 'updated_at']
+    
+    def get_changes_display(self, obj):
+        return obj.get_changes_display()
+
+class StartupEditRequestDetailSerializer(serializers.ModelSerializer):
+    """Detailed serializer for viewing edit requests"""
+    startup_name = serializers.CharField(source='startup.name', read_only=True)
+    requested_by_username = serializers.CharField(source='requested_by.username', read_only=True)
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True, allow_null=True)
+    changes_display = serializers.SerializerMethodField()
+    time_ago = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = StartupEditRequest
+        fields = [
+            'id', 'startup', 'startup_name', 'requested_by', 'requested_by_username',
+            'status', 'proposed_changes', 'original_values', 'changes_display',
+            'reviewed_by', 'reviewed_by_username', 'reviewed_at', 'review_notes',
+            'created_at', 'updated_at', 'time_ago'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_changes_display(self, obj):
+        return obj.get_changes_display()
+    
+    def get_time_ago(self, obj):
+        from django.utils import timezone
+        diff = timezone.now() - obj.created_at
+        if diff.days > 0:
+            return f"{diff.days} days ago"
+        elif diff.seconds > 3600:
+            return f"{diff.seconds // 3600} hours ago"
+        else:
+            return f"{diff.seconds // 60} minutes ago"
+
 # Startup creation serializer
 class StartupCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating new startups"""
@@ -161,7 +233,8 @@ class StartupCreateSerializer(serializers.ModelSerializer):
             'name', 'description', 'industry', 'location', 'website', 'logo',
             'funding_amount', 'valuation', 'employee_count', 'founded_year',
             'revenue', 'user_count', 'growth_rate', 'cover_image_url', 
-            'is_featured', 'founders', 'tags'
+            'is_featured', 'founders', 'tags', 'contact_email', 'contact_phone',
+            'business_model', 'target_market'
         ]
         extra_kwargs = {
             'name': {'required': True},
@@ -241,7 +314,9 @@ class StartupCreateSerializer(serializers.ModelSerializer):
             valid_founders.append({
                 'name': name,
                 'title': title,
-                'bio': bio
+                'bio': bio,
+                'linkedin_url': founder_data.get('linkedin_url', ''),
+                'twitter_url': founder_data.get('twitter_url', '')
             })
         
         if not valid_founders:
@@ -315,11 +390,18 @@ class StartupDetailSerializer(StartupListSerializer):
     # Social proof metrics
     engagement_metrics = serializers.SerializerMethodField()
     
+    # Edit request info
+    pending_edit_requests = serializers.SerializerMethodField()
+    
+    # Submitted by info
+    submitted_by_username = serializers.CharField(source='submitted_by.username', read_only=True, allow_null=True)
+    
     class Meta(StartupListSerializer.Meta):
         fields = StartupListSerializer.Meta.fields + [
             'industry_detail', 'user_rating', 'founders', 'tags',
             'recent_ratings', 'recent_comments', 'open_jobs',
-            'similar_startups', 'engagement_metrics'
+            'similar_startups', 'engagement_metrics', 'pending_edit_requests',
+            'submitted_by', 'submitted_by_username'
         ]
     
     def get_industry_detail(self, obj):
@@ -435,3 +517,16 @@ class StartupDetailSerializer(StartupListSerializer):
             'recent_bookmarks': recent_bookmarks,
             'engagement_change_percent': round(engagement_change, 1)
         }
+    
+    def get_pending_edit_requests(self, obj):
+        """Get pending edit requests if user has permission to see them"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return []
+        
+        # Only show to admins or the startup submitter
+        if not (request.user.is_staff or request.user.is_superuser or request.user == obj.submitted_by):
+            return []
+        
+        pending_requests = obj.edit_requests.filter(status='pending').order_by('-created_at')[:5]
+        return StartupEditRequestDetailSerializer(pending_requests, many=True).data
