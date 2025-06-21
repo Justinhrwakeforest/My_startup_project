@@ -1,9 +1,11 @@
-# startup_hub/apps/jobs/models.py
+# startup_hub/apps/jobs/models.py - Complete models file with approval system and company verification
+
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from datetime import timedelta
+import re
 
 User = get_user_model()
 
@@ -22,12 +24,15 @@ class Job(models.Model):
     ]
     
     STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('pending', 'Pending Approval'),
         ('active', 'Active'),
         ('paused', 'Paused'),
         ('closed', 'Closed'),
-        ('draft', 'Draft'),
+        ('rejected', 'Rejected'),
     ]
     
+    # Basic job information
     startup = models.ForeignKey('startups.Startup', on_delete=models.CASCADE, related_name='jobs')
     title = models.CharField(max_length=100)
     description = models.TextField()
@@ -47,11 +52,19 @@ class Job(models.Model):
     )
     
     # Status and dates
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     posted_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     expires_at = models.DateTimeField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=False)
+    
+    # Approval and posting tracking
+    posted_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posted_jobs')
+    company_email = models.EmailField(help_text="Company email to verify authorization")
+    is_verified = models.BooleanField(default=False, help_text="Email domain verified against company")
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_jobs')
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
     
     # Tracking
     view_count = models.PositiveIntegerField(default=0)
@@ -67,6 +80,8 @@ class Job(models.Model):
             models.Index(fields=['posted_at']),
             models.Index(fields=['is_active', 'status']),
             models.Index(fields=['startup', 'is_active']),
+            models.Index(fields=['status', 'posted_at']),
+            models.Index(fields=['posted_by', 'status']),
         ]
     
     def __str__(self):
@@ -109,10 +124,151 @@ class Job(models.Model):
             return max(0, diff.days)
         return None
     
+    @property
+    def can_edit(self):
+        """Check if job can be edited"""
+        return self.status in ['draft', 'pending', 'rejected']
+    
     def increment_view_count(self):
         """Increment view count"""
         self.view_count += 1
         self.save(update_fields=['view_count'])
+    
+    def verify_company_email(self):
+        """Verify if email domain matches company"""
+        if not self.company_email or not self.startup:
+            return False
+        
+        email_domain = self.company_email.split('@')[1].lower()
+        
+        # Check if startup website domain matches email domain
+        if self.startup.website:
+            # Extract domain from website URL
+            website_domain = self.startup.website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0].lower()
+            
+            # Check for exact match or subdomain match
+            if email_domain == website_domain or email_domain.endswith('.' + website_domain):
+                self.is_verified = True
+                self.save(update_fields=['is_verified'])
+                return True
+        
+        # Check against common company domain patterns
+        company_name_parts = self.startup.name.lower().replace(' ', '').replace('-', '').replace('_', '')
+        
+        # Remove common suffixes
+        for suffix in ['.com', '.org', '.net', '.io']:
+            if email_domain.endswith(suffix):
+                domain_name = email_domain.replace(suffix, '')
+                if domain_name in company_name_parts or company_name_parts in domain_name:
+                    self.is_verified = True
+                    self.save(update_fields=['is_verified'])
+                    return True
+        
+        return False
+    
+    def approve(self, approved_by_user):
+        """Approve the job posting"""
+        self.status = 'active'
+        self.is_active = True
+        self.approved_by = approved_by_user
+        self.approved_at = timezone.now()
+        self.save(update_fields=['status', 'is_active', 'approved_by', 'approved_at'])
+    
+    def reject(self, rejected_by_user, reason=''):
+        """Reject the job posting"""
+        self.status = 'rejected'
+        self.is_active = False
+        self.approved_by = rejected_by_user
+        self.approved_at = timezone.now()
+        self.rejection_reason = reason
+        self.save(update_fields=['status', 'is_active', 'approved_by', 'approved_at', 'rejection_reason'])
+    
+    def can_user_edit(self, user):
+        """Check if a specific user can edit this job"""
+        # Only the poster can edit, and only if job is not approved yet
+        return (
+            user == self.posted_by and 
+            self.status in ['draft', 'pending', 'rejected'] and
+            user.is_authenticated
+        )
+
+class JobEditRequest(models.Model):
+    """Track edit requests for approved jobs"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='edit_requests')
+    requested_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_edit_requests')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Store the proposed changes as JSON
+    proposed_changes = models.JSONField(help_text='JSON object of field names and new values')
+    original_values = models.JSONField(help_text='JSON object of field names and original values')
+    
+    # Review information
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_job_edits')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['job', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"Edit request for {self.job.title} by {self.requested_by.username}"
+    
+    def get_changes_display(self):
+        """Get a human-readable display of the changes"""
+        changes = []
+        for field, new_value in self.proposed_changes.items():
+            old_value = self.original_values.get(field, '')
+            if old_value != new_value:
+                changes.append(f"{field}: '{old_value}' → '{new_value}'")
+        return changes
+    
+    def apply_changes(self):
+        """Apply the proposed changes to the job"""
+        if self.status != 'approved':
+            raise ValueError("Can only apply approved changes")
+        
+        # Apply each field change
+        for field, new_value in self.proposed_changes.items():
+            if hasattr(self.job, field) and field not in ['id', 'created_at', 'updated_at', 'views']:
+                setattr(self.job, field, new_value)
+        
+        self.job.save()
+        return self.job
+    
+    def approve(self, user):
+        """Approve the edit request and apply changes"""
+        self.status = 'approved'
+        self.reviewed_by = user
+        self.reviewed_at = timezone.now()
+        self.save()
+        
+        # Apply the changes
+        self.apply_changes()
+        
+        return self
+    
+    def reject(self, user, notes=''):
+        """Reject the edit request"""
+        self.status = 'rejected'
+        self.reviewed_by = user
+        self.reviewed_at = timezone.now()
+        self.review_notes = notes
+        self.save()
+        return self
 
 class JobSkill(models.Model):
     job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='skills')
