@@ -1,4 +1,4 @@
-# apps/startups/views.py - Complete Working Version with Edit Request Feature
+# apps/startups/views.py - Complete Working Version with Edit Request Feature and Image Upload
 
 import logging
 from rest_framework import viewsets, status, filters
@@ -32,7 +32,7 @@ class IndustryViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = IndustrySerializer
     
     def list(self, request, *args, **kwargs):
-        logger.info(f"📋 Industries list requested by user: {request.user}")
+        logger.info(f"Industries list requested by user: {request.user}")
         return super().list(request, *args, **kwargs)
 
 class StartupViewSet(viewsets.ModelViewSet):
@@ -156,7 +156,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         elif self.action in ['admin_list', 'admin_action', 'bulk_admin']:
             # Require authentication for admin actions
             permission_classes = [IsAuthenticated]
-        elif self.action in ['submit_edit', 'edit_request']:
+        elif self.action in ['submit_edit', 'edit_request', 'upload_cover_image', 'test_edit']:
             # Require authentication for edit requests
             permission_classes = [IsAuthenticated]
         else:
@@ -166,22 +166,22 @@ class StartupViewSet(viewsets.ModelViewSet):
     
     def create(self, request, *args, **kwargs):
         """Create a new startup submission"""
-        logger.info(f"🚀 Creating new startup by user: {request.user}")
+        logger.info(f"Creating new startup by user: {request.user}")
         
         # Check if user is authenticated
         if not request.user.is_authenticated:
-            logger.warning(f"❌ Unauthenticated user attempted to create startup")
+            logger.warning(f"Unauthenticated user attempted to create startup")
             return Response({'error': 'Authentication required'}, 
                            status=status.HTTP_401_UNAUTHORIZED)
         
         try:
             # Log the incoming data (without sensitive info)
-            logger.info(f"📝 Received data keys: {list(request.data.keys())}")
+            logger.info(f"Received data keys: {list(request.data.keys())}")
             
             # Validate data using serializer
             serializer = self.get_serializer(data=request.data)
             if not serializer.is_valid():
-                logger.warning(f"❌ Validation errors: {serializer.errors}")
+                logger.warning(f"Validation errors: {serializer.errors}")
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             
             # Save the startup with the current user as submitter
@@ -191,7 +191,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             # Return the created startup using the detail serializer
             response_serializer = StartupDetailSerializer(startup, context={'request': request})
             
-            logger.info(f"✅ Startup created successfully: {startup.name} (ID: {startup.id})")
+            logger.info(f"Startup created successfully: {startup.name} (ID: {startup.id})")
             
             return Response({
                 'message': 'Startup submitted successfully! It will be reviewed before being published.',
@@ -201,9 +201,9 @@ class StartupViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_201_CREATED)
             
         except Exception as e:
-            logger.error(f"❌ Error creating startup: {str(e)}")
+            logger.error(f"Error creating startup: {str(e)}")
             import traceback
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return Response({
                 'error': 'Failed to create startup. Please try again.',
                 'detail': str(e) if settings.DEBUG else 'Internal server error'
@@ -211,7 +211,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     
     def retrieve(self, request, *args, **kwargs):
         """Enhanced retrieve method with view tracking"""
-        logger.info(f"👁️ Retrieving startup {kwargs.get('pk')} for user: {request.user}")
+        logger.info(f"Retrieving startup {kwargs.get('pk')} for user: {request.user}")
         
         try:
             instance = self.get_object()
@@ -237,48 +237,124 @@ class StartupViewSet(viewsets.ModelViewSet):
             response_data['can_edit'] = optimized_instance.can_edit(request.user)
             response_data['has_pending_edits'] = optimized_instance.has_pending_edits()
             
-            logger.info(f"✅ Startup retrieved successfully: {instance.name}")
+            logger.info(f"Startup retrieved successfully: {instance.name}")
             return Response(response_data)
             
         except Exception as e:
-            logger.error(f"❌ Error retrieving startup: {str(e)}")
+            logger.error(f"Error retrieving startup: {str(e)}")
             return Response({'error': 'Startup not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # ==================== TEST ENDPOINT ====================
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def test_edit(self, request, pk=None):
+        """Simple test endpoint to verify edit functionality"""
+        try:
+            startup = self.get_object()
+            
+            # Log the request data
+            print(f"TEST: Test edit request for startup {pk}")
+            print(f"TEST: Request data: {request.data}")
+            print(f"TEST: User: {request.user}")
+            print(f"TEST: User can edit: {startup.can_edit(request.user)}")
+            print(f"TEST: User is admin: {request.user.is_staff or request.user.is_superuser}")
+            
+            return Response({
+                'message': 'Test edit endpoint working!',
+                'startup_id': pk,
+                'startup_name': startup.name,
+                'user_can_edit': startup.can_edit(request.user),
+                'request_data': request.data,
+                'user': str(request.user),
+                'is_admin': request.user.is_staff or request.user.is_superuser,
+                'test_success': True
+            })
+            
+        except Exception as e:
+            print(f"ERROR: Error in test edit: {str(e)}")
+            return Response({
+                'error': str(e),
+                'test_success': False
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     # ==================== EDIT REQUEST ACTIONS ====================
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def submit_edit(self, request, pk=None):
         """Submit an edit request for a startup"""
-        logger.info(f"✏️ Edit request for startup {pk} by user: {request.user}")
-        
-        startup = self.get_object()
-        
-        # Check if user can edit this startup
-        if not startup.can_edit(request.user):
-            logger.warning(f"❌ User {request.user} cannot edit startup {startup.name}")
-            return Response({
-                'error': 'You do not have permission to edit this startup. Only premium members who submitted the startup or admins can edit.'
-            }, status=status.HTTP_403_FORBIDDEN)
-        
-        # Check if user is admin/staff
-        is_admin = request.user.is_staff or request.user.is_superuser
-        
-        # Get the proposed changes
-        proposed_changes = request.data.get('changes', {})
-        
-        if not proposed_changes:
-            return Response({'error': 'No changes provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Remove fields that shouldn't be edited
-        protected_fields = ['id', 'created_at', 'updated_at', 'views', 'submitted_by', 'is_approved', 'is_featured']
-        for field in protected_fields:
-            proposed_changes.pop(field, None)
+        logger.info(f"Edit request for startup {pk} by user: {request.user}")
         
         try:
+            startup = self.get_object()
+            
+            # Debug logging
+            print(f"DEBUG: Edit request for startup {pk}")
+            print(f"DEBUG: User: {request.user}")
+            print(f"DEBUG: Request data: {request.data}")
+            print(f"DEBUG: User can edit: {startup.can_edit(request.user)}")
+            
+            # Check if user can edit this startup
+            if not startup.can_edit(request.user):
+                logger.warning(f"User {request.user} cannot edit startup {startup.name}")
+                return Response({
+                    'error': 'You do not have permission to edit this startup. Only premium members who submitted the startup or admins can edit.'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
+            # Check if user is admin/staff
+            is_admin = request.user.is_staff or request.user.is_superuser
+            
+            # Get the proposed changes
+            proposed_changes = request.data.get('changes', {})
+            
+            if not proposed_changes:
+                return Response({'error': 'No changes provided'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Remove fields that shouldn't be edited
+            protected_fields = ['id', 'created_at', 'updated_at', 'views', 'submitted_by', 'is_approved']
+            for field in protected_fields:
+                proposed_changes.pop(field, None)
+            
+            # Handle special fields that need processing
+            if 'founders' in proposed_changes:
+                # Process founders data
+                founders_data = proposed_changes['founders']
+                if isinstance(founders_data, list):
+                    # Clear existing founders and recreate
+                    startup.founders.all().delete()
+                    for founder_data in founders_data:
+                        if founder_data.get('name'):
+                            startup.founders.create(
+                                name=founder_data.get('name', ''),
+                                title=founder_data.get('title', 'Founder'),
+                                bio=founder_data.get('bio', ''),
+                                linkedin_url=founder_data.get('linkedin_url', ''),
+                                twitter_url=founder_data.get('twitter_url', '')
+                            )
+                proposed_changes.pop('founders')  # Remove from regular field updates
+            
+            if 'tags' in proposed_changes:
+                # Process tags data
+                tags_data = proposed_changes['tags']
+                if isinstance(tags_data, list):
+                    # Clear existing tags and recreate
+                    startup.tags.all().delete()
+                    for tag in tags_data:
+                        if tag.strip():
+                            startup.tags.create(tag=tag.strip())
+                proposed_changes.pop('tags')  # Remove from regular field updates
+            
+            if 'social_media' in proposed_changes:
+                # Handle social media data
+                social_media_data = proposed_changes['social_media']
+                if isinstance(social_media_data, dict):
+                    startup.social_media = social_media_data
+                    startup.save(update_fields=['social_media'])
+                proposed_changes.pop('social_media')
+            
             with transaction.atomic():
                 if is_admin:
                     # Admin can directly update the startup
-                    logger.info(f"👑 Admin {request.user} directly updating startup {startup.name}")
+                    logger.info(f"Admin {request.user} directly updating startup {startup.name}")
                     
                     for field, value in proposed_changes.items():
                         if hasattr(startup, field):
@@ -297,7 +373,7 @@ class StartupViewSet(viewsets.ModelViewSet):
                     
                 else:
                     # Premium member - create edit request
-                    logger.info(f"📝 Creating edit request for startup {startup.name} by premium user {request.user}")
+                    logger.info(f"Creating edit request for startup {startup.name} by premium user {request.user}")
                     
                     # Check if user already has a pending edit request
                     existing_pending = StartupEditRequest.objects.filter(
@@ -325,7 +401,7 @@ class StartupViewSet(viewsets.ModelViewSet):
                         original_values=original_values
                     )
                     
-                    logger.info(f"✅ Edit request created successfully (ID: {edit_request.id})")
+                    logger.info(f"Edit request created successfully (ID: {edit_request.id})")
                     
                     return Response({
                         'message': 'Edit request submitted successfully. It will be reviewed by an admin.',
@@ -334,9 +410,93 @@ class StartupViewSet(viewsets.ModelViewSet):
                     }, status=status.HTTP_201_CREATED)
                     
         except Exception as e:
-            logger.error(f"❌ Error processing edit request: {str(e)}")
+            logger.error(f"Error processing edit request: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return Response({
                 'error': 'Failed to process edit request',
+                'detail': str(e) if settings.DEBUG else 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def upload_cover_image(self, request, pk=None):
+        """Upload cover image for a startup"""
+        logger.info(f"Uploading cover image for startup {pk} by user: {request.user}")
+        
+        startup = self.get_object()
+        
+        # Check if user can edit this startup
+        if not startup.can_edit(request.user):
+            logger.warning(f"User {request.user} cannot upload image for startup {startup.name}")
+            return Response({
+                'error': 'You do not have permission to edit this startup'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if image file is provided
+        cover_image = request.FILES.get('cover_image')
+        if not cover_image:
+            return Response({
+                'error': 'No image file provided'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate file type
+        if not cover_image.content_type.startswith('image/'):
+            return Response({
+                'error': 'File must be an image (PNG, JPG, GIF)'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate file size (5MB limit)
+        if cover_image.size > 5 * 1024 * 1024:
+            return Response({
+                'error': 'Image file too large (max 5MB)'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            import os
+            from django.core.files.storage import default_storage
+            from django.core.files.base import ContentFile
+            import uuid
+            
+            # Generate unique filename
+            file_extension = os.path.splitext(cover_image.name)[1].lower()
+            unique_filename = f"startup_covers/{startup.id}_{uuid.uuid4().hex}{file_extension}"
+            
+            # Save the file
+            if hasattr(settings, 'MEDIA_ROOT') and settings.MEDIA_ROOT:
+                # Save to local media directory
+                file_path = default_storage.save(unique_filename, ContentFile(cover_image.read()))
+                
+                # Build the full URL
+                if hasattr(request, 'build_absolute_uri'):
+                    cover_image_url = request.build_absolute_uri(settings.MEDIA_URL + file_path)
+                else:
+                    cover_image_url = settings.MEDIA_URL + file_path
+                    
+            else:
+                # Fallback: create a data URL (base64 encoded) - not recommended for production
+                import base64
+                encoded_image = base64.b64encode(cover_image.read()).decode('utf-8')
+                cover_image_url = f"data:{cover_image.content_type};base64,{encoded_image}"
+            
+            # Update the startup's cover image URL
+            startup.cover_image_url = cover_image_url
+            startup.save(update_fields=['cover_image_url'])
+            
+            logger.info(f"Cover image uploaded successfully for {startup.name}")
+            
+            return Response({
+                'message': 'Cover image uploaded successfully',
+                'cover_image_url': cover_image_url,
+                'filename': cover_image.name,
+                'size': cover_image.size
+            })
+            
+        except Exception as e:
+            logger.error(f"Error uploading cover image: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return Response({
+                'error': 'Failed to upload image',
                 'detail': str(e) if settings.DEBUG else 'Internal server error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
@@ -373,7 +533,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def featured(self, request):
         """Get featured startups"""
-        logger.info(f"⭐ Featured startups requested by user: {request.user}")
+        logger.info(f"Featured startups requested by user: {request.user}")
         featured_startups = self.get_queryset().filter(is_featured=True)
         
         page = self.paginate_queryset(featured_startups)
@@ -387,7 +547,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def trending(self, request):
         """Get trending startups based on recent activity"""
-        logger.info(f"📈 Trending startups requested by user: {request.user}")
+        logger.info(f"Trending startups requested by user: {request.user}")
         
         # Get startups with recent activity (views, ratings, comments, likes)
         trending_startups = self.get_queryset().annotate(
@@ -405,7 +565,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         if not request.user.is_authenticated:
             return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
         
-        logger.info(f"📁 My startups requested by user: {request.user}")
+        logger.info(f"My startups requested by user: {request.user}")
         
         # Get all startups submitted by user (including unapproved ones)
         my_startups = Startup.objects.filter(submitted_by=request.user).order_by('-created_at')
@@ -422,7 +582,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def filters(self, request):
         """Get available filter options"""
-        logger.info(f"🔍 Filter options requested by user: {request.user}")
+        logger.info(f"Filter options requested by user: {request.user}")
         
         # Get all industries with startup counts (only for approved startups)
         industries = Industry.objects.annotate(
@@ -466,7 +626,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def rate(self, request, pk=None):
         """Rate a startup (1-5 stars)"""
-        logger.info(f"⭐ Rating startup {pk} by user: {request.user}")
+        logger.info(f"Rating startup {pk} by user: {request.user}")
         
         startup = self.get_object()
         rating_value = request.data.get('rating')
@@ -475,11 +635,11 @@ class StartupViewSet(viewsets.ModelViewSet):
         try:
             rating_value = int(rating_value)
             if not (1 <= rating_value <= 5):
-                logger.warning(f"❌ Invalid rating value: {rating_value}")
+                logger.warning(f"Invalid rating value: {rating_value}")
                 return Response({'error': 'Rating must be between 1 and 5'}, 
                               status=status.HTTP_400_BAD_REQUEST)
         except (ValueError, TypeError):
-            logger.warning(f"❌ Invalid rating format: {rating_value}")
+            logger.warning(f"Invalid rating format: {rating_value}")
             return Response({'error': 'Invalid rating value'}, 
                           status=status.HTTP_400_BAD_REQUEST)
         
@@ -494,7 +654,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             # Return updated startup metrics
             startup.refresh_from_db()
             
-            logger.info(f"✅ Rating {action_text} successfully: {rating_value}/5 for {startup.name}")
+            logger.info(f"Rating {action_text} successfully: {rating_value}/5 for {startup.name}")
             
             return Response({
                 'message': f'Rating {action_text} successfully',
@@ -505,25 +665,25 @@ class StartupViewSet(viewsets.ModelViewSet):
             })
             
         except Exception as e:
-            logger.error(f"❌ Error saving rating: {str(e)}")
+            logger.error(f"Error saving rating: {str(e)}")
             return Response({'error': 'Failed to save rating'}, 
                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def comment(self, request, pk=None):
         """Add a comment to a startup"""
-        logger.info(f"💬 Adding comment to startup {pk} by user: {request.user}")
+        logger.info(f"Adding comment to startup {pk} by user: {request.user}")
         
         startup = self.get_object()
         text = request.data.get('text', '').strip()
         
         if not text:
-            logger.warning(f"❌ Empty comment attempted by user: {request.user}")
+            logger.warning(f"Empty comment attempted by user: {request.user}")
             return Response({'error': 'Comment text is required'}, 
                           status=status.HTTP_400_BAD_REQUEST)
         
         if len(text) > 1000:
-            logger.warning(f"❌ Comment too long: {len(text)} characters")
+            logger.warning(f"Comment too long: {len(text)} characters")
             return Response({'error': 'Comment too long (max 1000 characters)'}, 
                           status=status.HTTP_400_BAD_REQUEST)
         
@@ -533,7 +693,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             )
             
             serializer = StartupCommentDetailSerializer(comment)
-            logger.info(f"✅ Comment added successfully to {startup.name}")
+            logger.info(f"Comment added successfully to {startup.name}")
             
             return Response({
                 'message': 'Comment added successfully',
@@ -541,14 +701,14 @@ class StartupViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_201_CREATED)
             
         except Exception as e:
-            logger.error(f"❌ Error saving comment: {str(e)}")
+            logger.error(f"Error saving comment: {str(e)}")
             return Response({'error': 'Failed to save comment'}, 
                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def bookmark(self, request, pk=None):
         """Bookmark/unbookmark a startup"""
-        logger.info(f"🔖 Toggling bookmark for startup {pk} by user: {request.user}")
+        logger.info(f"Toggling bookmark for startup {pk} by user: {request.user}")
         
         startup = self.get_object()
         
@@ -558,15 +718,15 @@ class StartupViewSet(viewsets.ModelViewSet):
             bookmark.delete()
             bookmarked = False
             message = 'Bookmark removed successfully'
-            logger.info(f"🗑️ Bookmark removed for {startup.name} by {request.user}")
+            logger.info(f"Bookmark removed for {startup.name} by {request.user}")
         except StartupBookmark.DoesNotExist:
             # Bookmark doesn't exist, so create it
             StartupBookmark.objects.create(startup=startup, user=request.user)
             bookmarked = True
             message = 'Startup bookmarked successfully'
-            logger.info(f"✅ Bookmark added for {startup.name} by {request.user}")
+            logger.info(f"Bookmark added for {startup.name} by {request.user}")
         except Exception as e:
-            logger.error(f"❌ Error toggling bookmark: {str(e)}")
+            logger.error(f"Error toggling bookmark: {str(e)}")
             return Response({'error': 'Failed to update bookmark'}, 
                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
@@ -584,7 +744,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def like(self, request, pk=None):
         """Like/unlike a startup"""
-        logger.info(f"❤️ Toggling like for startup {pk} by user: {request.user}")
+        logger.info(f"Toggling like for startup {pk} by user: {request.user}")
         
         startup = self.get_object()
         
@@ -594,15 +754,15 @@ class StartupViewSet(viewsets.ModelViewSet):
             like.delete()
             liked = False
             message = 'Like removed successfully'
-            logger.info(f"💔 Like removed for {startup.name} by {request.user}")
+            logger.info(f"Like removed for {startup.name} by {request.user}")
         except StartupLike.DoesNotExist:
             # Like doesn't exist, so create it
             StartupLike.objects.create(startup=startup, user=request.user)
             liked = True
             message = 'Startup liked successfully'
-            logger.info(f"❤️ Like added for {startup.name} by {request.user}")
+            logger.info(f"Like added for {startup.name} by {request.user}")
         except Exception as e:
-            logger.error(f"❌ Error toggling like: {str(e)}")
+            logger.error(f"Error toggling like: {str(e)}")
             return Response({'error': 'Failed to update like'}, 
                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
@@ -619,7 +779,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def bookmarked(self, request):
         """Get user's bookmarked startups"""
-        logger.info(f"🔖 Getting bookmarked startups for user: {request.user}")
+        logger.info(f"Getting bookmarked startups for user: {request.user}")
         
         # Get bookmarked startup IDs
         bookmarked_ids = request.user.startupbookmark_set.values_list('startup_id', flat=True)
@@ -642,10 +802,10 @@ class StartupViewSet(viewsets.ModelViewSet):
     def admin_list(self, request):
         """Get all startups for admin panel (including unapproved ones)"""
         if not (request.user.is_staff or request.user.is_superuser):
-            logger.warning(f"🚫 Non-admin user {request.user} attempted to access admin panel")
+            logger.warning(f"Non-admin user {request.user} attempted to access admin panel")
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
-        logger.info(f"👑 Admin panel accessed by: {request.user}")
+        logger.info(f"Admin panel accessed by: {request.user}")
         
         filter_type = request.query_params.get('filter', 'all')
         search = request.query_params.get('search', '')
@@ -685,13 +845,13 @@ class StartupViewSet(viewsets.ModelViewSet):
     def admin_action(self, request, pk=None):
         """Admin actions: approve, reject, feature, unfeature"""
         if not (request.user.is_staff or request.user.is_superuser):
-            logger.warning(f"🚫 Non-admin user {request.user} attempted admin action")
+            logger.warning(f"Non-admin user {request.user} attempted admin action")
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
         startup = self.get_object()
         action_type = request.data.get('action')
         
-        logger.info(f"👑 Admin action '{action_type}' on startup {startup.name} by {request.user}")
+        logger.info(f"Admin action '{action_type}' on startup {startup.name} by {request.user}")
         
         try:
             if action_type == 'approve':
@@ -717,24 +877,24 @@ class StartupViewSet(viewsets.ModelViewSet):
                 return Response({'message': 'Startup unfeatured successfully'})
             
             else:
-                logger.warning(f"❌ Invalid admin action: {action_type}")
+                logger.warning(f"Invalid admin action: {action_type}")
                 return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
                 
         except Exception as e:
-            logger.error(f"❌ Error performing admin action: {str(e)}")
+            logger.error(f"Error performing admin action: {str(e)}")
             return Response({'error': 'Failed to perform action'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='bulk-admin')
     def bulk_admin(self, request):
         """Bulk admin actions"""
         if not (request.user.is_staff or request.user.is_superuser):
-            logger.warning(f"🚫 Non-admin user {request.user} attempted bulk admin action")
+            logger.warning(f"Non-admin user {request.user} attempted bulk admin action")
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
         startup_ids = request.data.get('startup_ids', [])
         action_type = request.data.get('action')
         
-        logger.info(f"👑 Bulk admin action '{action_type}' on {len(startup_ids)} startups by {request.user}")
+        logger.info(f"Bulk admin action '{action_type}' on {len(startup_ids)} startups by {request.user}")
         
         if not startup_ids:
             return Response({'error': 'No startups selected'}, status=status.HTTP_400_BAD_REQUEST)
@@ -755,11 +915,11 @@ class StartupViewSet(viewsets.ModelViewSet):
                 return Response({'message': f'{updated_count} startups featured successfully'})
             
             else:
-                logger.warning(f"❌ Invalid bulk admin action: {action_type}")
+                logger.warning(f"Invalid bulk admin action: {action_type}")
                 return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
                 
         except Exception as e:
-            logger.error(f"❌ Error performing bulk admin action: {str(e)}")
+            logger.error(f"Error performing bulk admin action: {str(e)}")
             return Response({'error': 'Failed to perform bulk action'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     # ==================== ADMIN EDIT REQUEST ACTIONS ====================
@@ -770,7 +930,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         if not (request.user.is_staff or request.user.is_superuser):
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
-        logger.info(f"👑 Admin viewing all edit requests")
+        logger.info(f"Admin viewing all edit requests")
         
         # Get filter parameters
         status_filter = request.query_params.get('status', 'pending')
@@ -807,7 +967,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         try:
             edit_request = get_object_or_404(StartupEditRequest, id=request_id, status='pending')
             
-            logger.info(f"👑 Admin {request.user} approving edit request {request_id}")
+            logger.info(f"Admin {request.user} approving edit request {request_id}")
             
             # Approve and apply changes
             edit_request.approve(request.user)
@@ -824,7 +984,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Edit request not found or already processed'}, 
                           status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            logger.error(f"❌ Error approving edit request: {str(e)}")
+            logger.error(f"Error approving edit request: {str(e)}")
             return Response({'error': 'Failed to approve edit request'}, 
                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
@@ -837,7 +997,7 @@ class StartupViewSet(viewsets.ModelViewSet):
         try:
             edit_request = get_object_or_404(StartupEditRequest, id=request_id, status='pending')
             
-            logger.info(f"👑 Admin {request.user} rejecting edit request {request_id}")
+            logger.info(f"Admin {request.user} rejecting edit request {request_id}")
             
             # Get rejection notes
             notes = request.data.get('notes', '')
@@ -854,7 +1014,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Edit request not found or already processed'}, 
                           status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            logger.error(f"❌ Error rejecting edit request: {str(e)}")
+            logger.error(f"Error rejecting edit request: {str(e)}")
             return Response({'error': 'Failed to reject edit request'}, 
                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
@@ -887,7 +1047,7 @@ class StartupViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You don't have permission to delete this startup")
         
-        logger.info(f"🗑️ Deleting startup {instance.name} by {self.request.user}")
+        logger.info(f"Deleting startup {instance.name} by {self.request.user}")
         instance.delete()
 
 
