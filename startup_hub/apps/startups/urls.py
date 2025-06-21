@@ -1,4 +1,4 @@
-# apps/startups/urls.py - Alternative simple configuration
+# apps/startups/urls.py - Complete fixed configuration
 from django.urls import path
 from .views import StartupViewSet, IndustryViewSet
 
@@ -10,6 +10,11 @@ urlpatterns = [
     # Startups
     path('', StartupViewSet.as_view({'get': 'list', 'post': 'create'}), name='startup-list'),
     path('<int:pk>/', StartupViewSet.as_view({'get': 'retrieve', 'put': 'update', 'delete': 'destroy'}), name='startup-detail'),
+    
+    # Admin endpoints - FIXED
+    path('admin/', StartupViewSet.as_view({'get': 'admin_list'}), name='startup-admin-list'),
+    path('<int:pk>/admin/', StartupViewSet.as_view({'patch': 'admin_action'}), name='startup-admin-action'),
+    path('bulk-admin/', StartupViewSet.as_view({'post': 'bulk_admin'}), name='startup-bulk-admin'),
     
     # Custom actions
     path('<int:pk>/rate/', StartupViewSet.as_view({'post': 'rate'}), name='startup-rate'),
