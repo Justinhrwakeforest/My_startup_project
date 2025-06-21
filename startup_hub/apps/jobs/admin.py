@@ -1,176 +1,187 @@
-# startup_hub/apps/startups/admin.py - Complete file with edit request management
+# startup_hub/apps/jobs/admin.py - Updated with approval management
 
 from django.contrib import admin
 from django.utils.html import format_html
 from django.urls import reverse
 from django.utils import timezone
 from django.contrib import messages
-import json
-from .models import (
-    Industry, Startup, StartupFounder, StartupTag, StartupRating, 
-    StartupComment, StartupBookmark, StartupLike, StartupSubmission,
-    UserProfile, StartupEditRequest
-)
+from .models import JobType, Job, JobSkill, JobApplication, JobEditRequest
 
-@admin.register(Industry)
-class IndustryAdmin(admin.ModelAdmin):
-    list_display = ['name', 'icon', 'startup_count', 'description']
-    search_fields = ['name', 'description']
-    ordering = ['name']
+@admin.register(JobType)
+class JobTypeAdmin(admin.ModelAdmin):
+    list_display = ['name', 'job_count']
+    search_fields = ['name']
     
-    def startup_count(self, obj):
-        return obj.startups.count()
-    startup_count.short_description = 'Number of Startups'
+    def job_count(self, obj):
+        return obj.job_set.count()
+    job_count.short_description = 'Total Jobs'
 
-@admin.register(UserProfile)
-class UserProfileAdmin(admin.ModelAdmin):
-    list_display = ['user', 'is_premium', 'premium_expires_at', 'is_premium_active']
-    list_filter = ['is_premium', 'premium_expires_at']
-    search_fields = ['user__username', 'user__email']
-    ordering = ['-premium_expires_at']
-    
-    fieldsets = (
-        ('User Information', {
-            'fields': ('user',)
-        }),
-        ('Premium Status', {
-            'fields': ('is_premium', 'premium_expires_at'),
-            'description': 'Manage premium membership status for users'
-        }),
-    )
-    
-    def is_premium_active(self, obj):
-        return obj.is_premium_active
-    is_premium_active.boolean = True
-    is_premium_active.short_description = 'Premium Active'
-
-class StartupFounderInline(admin.TabularInline):
-    model = StartupFounder
-    extra = 1
-    max_num = 5
-
-class StartupTagInline(admin.TabularInline):
-    model = StartupTag
-    extra = 1
-    max_num = 10
-
-class StartupEditRequestInline(admin.TabularInline):
-    model = StartupEditRequest
-    extra = 0
-    fields = ['requested_by', 'status', 'created_at', 'view_details']
-    readonly_fields = ['requested_by', 'created_at', 'view_details']
-    can_delete = False
-    
-    def view_details(self, obj):
-        url = reverse('admin:startups_startupeditrequest_change', args=[obj.pk])
-        return format_html('<a href="{}">View Details</a>', url)
-    view_details.short_description = 'Details'
-
-@admin.register(Startup)
-class StartupAdmin(admin.ModelAdmin):
+@admin.register(Job)
+class JobAdmin(admin.ModelAdmin):
     list_display = [
-        'name', 'industry', 'location', 'employee_count', 'founded_year',
-        'is_approved', 'is_featured', 'submitted_by', 'approval_status',
-        'total_ratings', 'average_rating', 'views', 'has_pending_edits', 'created_at'
+        'title', 'startup', 'posted_by', 'company_email', 'email_verified_status', 
+        'status', 'approval_status', 'location', 'job_type', 'is_remote', 
+        'is_urgent', 'posted_at', 'application_count'
     ]
     list_filter = [
-        'is_approved', 'is_featured', 'industry', 'founded_year', 
-        'created_at'
+        'status', 'is_verified', 'job_type', 'is_remote', 'is_urgent', 
+        'experience_level', 'posted_at', 'approved_at'
     ]
-    search_fields = ['name', 'description', 'location', 'founders__name']
-    ordering = ['-created_at']
-    readonly_fields = ['views', 'created_at', 'updated_at', 'average_rating', 'total_ratings', 'submitted_by']
-    
-    inlines = [StartupFounderInline, StartupTagInline, StartupEditRequestInline]
+    search_fields = ['title', 'description', 'startup__name', 'posted_by__username', 'company_email']
+    readonly_fields = [
+        'posted_at', 'updated_at', 'view_count', 'posted_by', 'approved_by', 
+        'approved_at', 'email_verification_check'
+    ]
     
     fieldsets = (
-        ('Basic Information', {
-            'fields': ('name', 'logo', 'description', 'industry', 'location', 'website', 'cover_image_url')
+        ('Job Information', {
+            'fields': ('title', 'description', 'startup', 'job_type', 'location', 'salary_range')
         }),
-        ('Company Details', {
-            'fields': ('employee_count', 'founded_year', 'funding_amount', 'valuation', 'business_model', 'target_market')
+        ('Requirements', {
+            'fields': ('experience_level', 'requirements', 'benefits')
+        }),
+        ('Work Options', {
+            'fields': ('is_remote', 'is_urgent', 'application_deadline', 'expires_at')
+        }),
+        ('Posting Information', {
+            'fields': ('posted_by', 'company_email', 'email_verification_check', 'is_verified')
+        }),
+        ('Status & Approval', {
+            'fields': ('status', 'is_active', 'approved_by', 'approved_at', 'rejection_reason')
         }),
         ('Metrics', {
-            'fields': ('revenue', 'user_count', 'growth_rate')
-        }),
-        ('Contact Information', {
-            'fields': ('contact_email', 'contact_phone'),
-            'classes': ('collapse',)
-        }),
-        ('Status', {
-            'fields': ('is_approved', 'is_featured', 'submitted_by')
-        }),
-        ('System Info', {
-            'fields': ('views', 'average_rating', 'total_ratings', 'created_at', 'updated_at'),
+            'fields': ('view_count', 'posted_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )
     
-    actions = ['approve_startups', 'feature_startups', 'unfeature_startups']
+    actions = ['approve_jobs', 'reject_jobs', 'verify_emails', 'deactivate_jobs']
+    
+    def email_verified_status(self, obj):
+        """Display email verification status"""
+        if obj.is_verified:
+            return format_html('<span style="color: green;">✓ Verified</span>')
+        else:
+            return format_html('<span style="color: red;">✗ Unverified</span>')
+    email_verified_status.short_description = 'Email Status'
     
     def approval_status(self, obj):
-        if obj.is_approved:
-            return format_html('<span style="color: green;">✓ Approved</span>')
-        else:
-            return format_html('<span style="color: red;">✗ Pending</span>')
+        """Display approval status with colors"""
+        status_colors = {
+            'pending': 'orange',
+            'active': 'green', 
+            'rejected': 'red',
+            'draft': 'gray',
+            'paused': 'blue',
+            'closed': 'gray'
+        }
+        color = status_colors.get(obj.status, 'black')
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>', 
+            color, 
+            obj.get_status_display()
+        )
     approval_status.short_description = 'Status'
     
-    def total_ratings(self, obj):
-        return obj.ratings.count()
-    total_ratings.short_description = 'Total Ratings'
+    def application_count(self, obj):
+        """Show number of applications"""
+        count = obj.applications.count()
+        if count > 0:
+            url = reverse('admin:jobs_jobapplication_changelist') + f'?job__id__exact={obj.pk}'
+            return format_html('<a href="{}">{} applications</a>', url, count)
+        return "0 applications"
+    application_count.short_description = 'Applications'
     
-    def average_rating(self, obj):
-        avg = obj.average_rating
-        if avg:
-            return f"{avg:.1f}/5.0"
-        return "No ratings"
-    average_rating.short_description = 'Avg Rating'
-    
-    def has_pending_edits(self, obj):
-        pending_count = obj.edit_requests.filter(status='pending').count()
-        if pending_count > 0:
-            url = reverse('admin:startups_startupeditrequest_changelist') + f'?startup__id__exact={obj.pk}&status__exact=pending'
-            return format_html('<a href="{}" style="color: orange; font-weight: bold;">{} pending</a>', url, pending_count)
-        return format_html('<span style="color: green;">None</span>')
-    has_pending_edits.short_description = 'Pending Edits'
-    
-    def approve_startups(self, request, queryset):
-        updated = queryset.update(is_approved=True)
-        # Also update submission status if exists
-        for startup in queryset:
-            if hasattr(startup, 'submission'):
-                startup.submission.status = 'approved'
-                startup.submission.reviewed_by = request.user
-                startup.submission.reviewed_at = timezone.now()
-                startup.submission.save()
+    def email_verification_check(self, obj):
+        """Show email verification details"""
+        if not obj.company_email:
+            return "No email provided"
         
-        self.message_user(request, f'{updated} startup(s) were approved.')
-    approve_startups.short_description = "Approve selected startups"
+        domain = obj.company_email.split('@')[1] if '@' in obj.company_email else 'Invalid'
+        website_domain = ''
+        
+        if obj.startup and obj.startup.website:
+            website_domain = obj.startup.website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
+        
+        return format_html(
+            'Email: {}<br>Domain: {}<br>Company Website: {}<br>Match: {}',
+            obj.company_email,
+            domain,
+            website_domain or 'Not provided',
+            '✓ Yes' if obj.is_verified else '✗ No'
+        )
+    email_verification_check.short_description = 'Email Verification Details'
     
-    def feature_startups(self, request, queryset):
-        updated = queryset.update(is_featured=True)
-        self.message_user(request, f'{updated} startup(s) were featured.')
-    feature_startups.short_description = "Feature selected startups"
+    def approve_jobs(self, request, queryset):
+        """Approve selected job postings"""
+        pending_jobs = queryset.filter(status='pending')
+        approved_count = 0
+        
+        for job in pending_jobs:
+            # Verify email before approving
+            if not job.is_verified:
+                job.verify_company_email()
+            
+            if job.is_verified:
+                job.approve(request.user)
+                approved_count += 1
+                messages.success(request, f'Approved job: {job.title}')
+            else:
+                messages.warning(request, f'Cannot approve {job.title}: Email not verified')
+        
+        if approved_count > 0:
+            messages.success(request, f'{approved_count} job(s) approved successfully.')
+    approve_jobs.short_description = "Approve selected jobs"
     
-    def unfeature_startups(self, request, queryset):
-        updated = queryset.update(is_featured=False)
-        self.message_user(request, f'{updated} startup(s) were unfeatured.')
-    unfeature_startups.short_description = "Unfeature selected startups"
+    def reject_jobs(self, request, queryset):
+        """Reject selected job postings"""
+        pending_jobs = queryset.filter(status='pending')
+        rejected_count = 0
+        
+        for job in pending_jobs:
+            job.reject(request.user, 'Rejected via admin action')
+            rejected_count += 1
+        
+        if rejected_count > 0:
+            messages.success(request, f'{rejected_count} job(s) rejected.')
+    reject_jobs.short_description = "Reject selected jobs"
+    
+    def verify_emails(self, request, queryset):
+        """Verify company emails for selected jobs"""
+        verified_count = 0
+        
+        for job in queryset:
+            if job.verify_company_email():
+                verified_count += 1
+        
+        messages.success(request, f'{verified_count} email(s) verified.')
+    verify_emails.short_description = "Verify company emails"
+    
+    def deactivate_jobs(self, request, queryset):
+        """Deactivate selected jobs"""
+        updated = queryset.update(is_active=False, status='paused')
+        messages.success(request, f'{updated} job(s) deactivated.')
+    deactivate_jobs.short_description = "Deactivate selected jobs"
+    
+    def get_queryset(self, request):
+        """Optimize queryset with related data"""
+        return super().get_queryset(request).select_related(
+            'startup', 'job_type', 'posted_by', 'approved_by'
+        ).prefetch_related('applications')
 
-@admin.register(StartupEditRequest)
-class StartupEditRequestAdmin(admin.ModelAdmin):
+@admin.register(JobEditRequest)
+class JobEditRequestAdmin(admin.ModelAdmin):
     list_display = [
-        'startup_name', 'requested_by', 'status', 'created_at', 
+        'job_title', 'job_startup', 'requested_by', 'status', 'created_at', 
         'reviewed_by', 'reviewed_at', 'changes_preview'
     ]
     list_filter = ['status', 'created_at', 'reviewed_at']
-    search_fields = ['startup__name', 'requested_by__username', 'requested_by__email']
-    ordering = ['-created_at']
-    readonly_fields = ['created_at', 'updated_at', 'requested_by', 'startup', 'original_values', 'changes_display']
+    search_fields = ['job__title', 'job__startup__name', 'requested_by__username']
+    readonly_fields = ['created_at', 'updated_at', 'job', 'requested_by', 'changes_display']
     
     fieldsets = (
         ('Request Information', {
-            'fields': ('startup', 'requested_by', 'status', 'created_at')
+            'fields': ('job', 'requested_by', 'status', 'created_at')
         }),
         ('Proposed Changes', {
             'fields': ('changes_display', 'proposed_changes', 'original_values'),
@@ -183,215 +194,116 @@ class StartupEditRequestAdmin(admin.ModelAdmin):
     
     actions = ['approve_edit_requests', 'reject_edit_requests']
     
-    def startup_name(self, obj):
-        url = reverse('admin:startups_startup_change', args=[obj.startup.pk])
-        return format_html('<a href="{}">{}</a>', url, obj.startup.name)
-    startup_name.short_description = 'Startup'
+    def job_title(self, obj):
+        """Link to job admin page"""
+        url = reverse('admin:jobs_job_change', args=[obj.job.pk])
+        return format_html('<a href="{}">{}</a>', url, obj.job.title)
+    job_title.short_description = 'Job'
+    
+    def job_startup(self, obj):
+        """Show startup name"""
+        return obj.job.startup.name
+    job_startup.short_description = 'Startup'
     
     def changes_preview(self, obj):
-        changes = obj.get_changes_display()
-        if changes:
-            preview = '<br>'.join(changes[:3])  # Show first 3 changes
-            if len(changes) > 3:
-                preview += f'<br>... and {len(changes) - 3} more'
-            return format_html('<small>{}</small>', preview)
-        return 'No changes'
+        """Show a preview of changes"""
+        changes = []
+        for field, new_value in obj.proposed_changes.items():
+            old_value = obj.original_values.get(field, '')
+            if old_value != new_value:
+                changes.append(f"{field}: '{str(old_value)[:30]}...' → '{str(new_value)[:30]}...'")
+        
+        preview = '<br>'.join(changes[:3])
+        if len(changes) > 3:
+            preview += f'<br>... and {len(changes) - 3} more'
+        
+        return format_html('<small>{}</small>', preview) if changes else 'No changes'
     changes_preview.short_description = 'Changes'
     
     def changes_display(self, obj):
-        changes = obj.get_changes_display()
-        if changes:
-            html = '<table style="width: 100%; border-collapse: collapse;">'
-            html += '<tr><th style="text-align: left; padding: 5px; border-bottom: 1px solid #ddd;">Field</th>'
-            html += '<th style="text-align: left; padding: 5px; border-bottom: 1px solid #ddd;">Original</th>'
-            html += '<th style="text-align: left; padding: 5px; border-bottom: 1px solid #ddd;">Proposed</th></tr>'
-            
-            for field, new_value in obj.proposed_changes.items():
-                old_value = obj.original_values.get(field, '')
-                if old_value != new_value:
-                    html += f'<tr>'
-                    html += f'<td style="padding: 5px; border-bottom: 1px solid #eee;"><strong>{field}</strong></td>'
-                    html += f'<td style="padding: 5px; border-bottom: 1px solid #eee; color: #666;">{old_value or "(empty)"}</td>'
-                    html += f'<td style="padding: 5px; border-bottom: 1px solid #eee; color: #0a0;">{new_value or "(empty)"}</td>'
-                    html += f'</tr>'
-            
-            html += '</table>'
-            return format_html(html)
-        return 'No changes'
+        """Detailed changes display"""
+        changes_html = '<table style="width: 100%; border-collapse: collapse;">'
+        changes_html += '<tr><th style="text-align: left; padding: 5px; border-bottom: 1px solid #ddd;">Field</th>'
+        changes_html += '<th style="text-align: left; padding: 5px; border-bottom: 1px solid #ddd;">Original</th>'
+        changes_html += '<th style="text-align: left; padding: 5px; border-bottom: 1px solid #ddd;">Proposed</th></tr>'
+        
+        for field, new_value in obj.proposed_changes.items():
+            old_value = obj.original_values.get(field, '')
+            if old_value != new_value:
+                changes_html += f'<tr>'
+                changes_html += f'<td style="padding: 5px; border-bottom: 1px solid #eee;"><strong>{field}</strong></td>'
+                changes_html += f'<td style="padding: 5px; border-bottom: 1px solid #eee; color: #666;">{old_value or "(empty)"}</td>'
+                changes_html += f'<td style="padding: 5px; border-bottom: 1px solid #eee; color: #0a0;">{new_value or "(empty)"}</td>'
+                changes_html += f'</tr>'
+        
+        changes_html += '</table>'
+        return format_html(changes_html)
     changes_display.short_description = 'Detailed Changes'
     
     def approve_edit_requests(self, request, queryset):
+        """Approve selected edit requests"""
         approved_count = 0
         for edit_request in queryset.filter(status='pending'):
             try:
-                edit_request.approve(request.user)
+                # Apply changes to the job
+                job = edit_request.job
+                for field, value in edit_request.proposed_changes.items():
+                    if hasattr(job, field):
+                        setattr(job, field, value)
+                job.save()
+                
+                # Mark request as approved
+                edit_request.status = 'approved'
+                edit_request.reviewed_by = request.user
+                edit_request.reviewed_at = timezone.now()
+                edit_request.save()
+                
                 approved_count += 1
-                messages.success(request, f'Edit request for "{edit_request.startup.name}" approved and changes applied.')
+                messages.success(request, f'Edit request for "{job.title}" approved and applied.')
             except Exception as e:
-                messages.error(request, f'Error approving edit request for "{edit_request.startup.name}": {str(e)}')
+                messages.error(request, f'Error approving edit request: {str(e)}')
         
         if approved_count > 0:
-            messages.success(request, f'{approved_count} edit request(s) were approved and changes applied.')
+            messages.success(request, f'{approved_count} edit request(s) approved.')
     approve_edit_requests.short_description = "Approve selected edit requests"
     
     def reject_edit_requests(self, request, queryset):
+        """Reject selected edit requests"""
         rejected_count = 0
         for edit_request in queryset.filter(status='pending'):
-            edit_request.reject(request.user, 'Rejected via admin action')
+            edit_request.status = 'rejected'
+            edit_request.reviewed_by = request.user
+            edit_request.reviewed_at = timezone.now()
+            edit_request.review_notes = 'Rejected via admin action'
+            edit_request.save()
             rejected_count += 1
         
         if rejected_count > 0:
-            messages.success(request, f'{rejected_count} edit request(s) were rejected.')
+            messages.success(request, f'{rejected_count} edit request(s) rejected.')
     reject_edit_requests.short_description = "Reject selected edit requests"
-    
-    def get_readonly_fields(self, request, obj=None):
-        # Make proposed_changes readonly if the request is not pending
-        if obj and obj.status != 'pending':
-            return self.readonly_fields + ['proposed_changes']
-        return self.readonly_fields
 
-@admin.register(StartupSubmission)
-class StartupSubmissionAdmin(admin.ModelAdmin):
-    list_display = [
-        'startup_name', 'submitted_by', 'status', 'submitted_at', 
-        'reviewed_by', 'reviewed_at', 'startup_link'
-    ]
-    list_filter = ['status', 'submitted_at', 'reviewed_at']
-    search_fields = ['startup__name', 'submitted_by__username', 'submitted_by__email']
-    ordering = ['-submitted_at']
-    readonly_fields = ['submitted_at', 'updated_at']
-    
-    fieldsets = (
-        ('Submission Info', {
-            'fields': ('startup', 'submitted_by', 'status', 'submitted_at')
-        }),
-        ('Review Info', {
-            'fields': ('reviewed_by', 'reviewed_at', 'review_notes')
-        }),
-    )
-    
-    actions = ['approve_submissions', 'reject_submissions', 'request_revisions']
-    
-    def startup_name(self, obj):
-        return obj.startup.name
-    startup_name.short_description = 'Startup Name'
-    
-    def startup_link(self, obj):
-        url = reverse('admin:startups_startup_change', args=[obj.startup.pk])
-        return format_html('<a href="{}">View Startup</a>', url)
-    startup_link.short_description = 'Startup'
-    
-    def approve_submissions(self, request, queryset):
-        for submission in queryset:
-            submission.status = 'approved'
-            submission.reviewed_by = request.user
-            submission.reviewed_at = timezone.now()
-            submission.startup.is_approved = True
-            submission.startup.save()
-            submission.save()
-        
-        self.message_user(request, f'{queryset.count()} submission(s) were approved.')
-    approve_submissions.short_description = "Approve selected submissions"
-    
-    def reject_submissions(self, request, queryset):
-        for submission in queryset:
-            submission.status = 'rejected'
-            submission.reviewed_by = request.user
-            submission.reviewed_at = timezone.now()
-            submission.startup.is_approved = False
-            submission.startup.save()
-            submission.save()
-        
-        self.message_user(request, f'{queryset.count()} submission(s) were rejected.')
-    reject_submissions.short_description = "Reject selected submissions"
-    
-    def request_revisions(self, request, queryset):
-        for submission in queryset:
-            submission.status = 'revision_requested'
-            submission.reviewed_by = request.user
-            submission.reviewed_at = timezone.now()
-            submission.save()
-        
-        self.message_user(request, f'{queryset.count()} submission(s) marked for revision.')
-    request_revisions.short_description = "Request revisions for selected submissions"
+@admin.register(JobSkill)
+class JobSkillAdmin(admin.ModelAdmin):
+    list_display = ['skill', 'job', 'is_required', 'proficiency_level']
+    list_filter = ['is_required', 'proficiency_level', 'skill']
+    search_fields = ['skill', 'job__title']
 
-@admin.register(StartupFounder)
-class StartupFounderAdmin(admin.ModelAdmin):
-    list_display = ['name', 'startup', 'title', 'bio_preview']
-    list_filter = ['title', 'startup__industry']
-    search_fields = ['name', 'startup__name', 'bio']
-    ordering = ['startup__name', 'name']
+@admin.register(JobApplication)
+class JobApplicationAdmin(admin.ModelAdmin):
+    list_display = ['job_title', 'user', 'status', 'applied_at', 'days_since_applied']
+    list_filter = ['status', 'applied_at', 'job__startup']
+    search_fields = ['job__title', 'user__username', 'user__email']
+    readonly_fields = ['applied_at', 'days_since_applied']
     
-    def bio_preview(self, obj):
-        return obj.bio[:50] + "..." if len(obj.bio) > 50 else obj.bio
-    bio_preview.short_description = 'Bio Preview'
+    def job_title(self, obj):
+        return obj.job.title
+    job_title.short_description = 'Job Title'
+    
+    def days_since_applied(self, obj):
+        return obj.days_since_applied
+    days_since_applied.short_description = 'Days Since Applied'
 
-@admin.register(StartupTag)
-class StartupTagAdmin(admin.ModelAdmin):
-    list_display = ['tag', 'startup', 'usage_count']
-    list_filter = ['startup__industry']
-    search_fields = ['tag', 'startup__name']
-    ordering = ['tag']
-    
-    def usage_count(self, obj):
-        return StartupTag.objects.filter(tag=obj.tag).count()
-    usage_count.short_description = 'Usage Count'
-
-@admin.register(StartupRating)
-class StartupRatingAdmin(admin.ModelAdmin):
-    list_display = ['startup', 'user', 'rating', 'created_at']
-    list_filter = ['rating', 'created_at', 'startup__industry']
-    search_fields = ['startup__name', 'user__username']
-    ordering = ['-created_at']
-    readonly_fields = ['created_at']
-
-@admin.register(StartupComment)
-class StartupCommentAdmin(admin.ModelAdmin):
-    list_display = ['startup', 'user', 'text_preview', 'likes', 'is_approved', 'created_at']
-    list_filter = ['is_approved', 'is_flagged', 'created_at', 'startup__industry']
-    search_fields = ['startup__name', 'user__username', 'text']
-    ordering = ['-created_at']
-    readonly_fields = ['created_at', 'likes']
-    
-    actions = ['approve_comments', 'flag_comments']
-    
-    def text_preview(self, obj):
-        return obj.text[:100] + "..." if len(obj.text) > 100 else obj.text
-    text_preview.short_description = 'Comment Preview'
-    
-    def approve_comments(self, request, queryset):
-        updated = queryset.update(is_approved=True, is_flagged=False)
-        self.message_user(request, f'{updated} comment(s) were approved.')
-    approve_comments.short_description = "Approve selected comments"
-    
-    def flag_comments(self, request, queryset):
-        updated = queryset.update(is_flagged=True, is_approved=False)
-        self.message_user(request, f'{updated} comment(s) were flagged.')
-    flag_comments.short_description = "Flag selected comments"
-
-@admin.register(StartupBookmark)
-class StartupBookmarkAdmin(admin.ModelAdmin):
-    list_display = ['user', 'startup', 'created_at', 'notes_preview']
-    list_filter = ['created_at', 'startup__industry']
-    search_fields = ['user__username', 'startup__name', 'notes']
-    ordering = ['-created_at']
-    readonly_fields = ['created_at']
-    
-    def notes_preview(self, obj):
-        if obj.notes:
-            return obj.notes[:50] + "..." if len(obj.notes) > 50 else obj.notes
-        return "No notes"
-    notes_preview.short_description = 'Notes Preview'
-
-@admin.register(StartupLike)
-class StartupLikeAdmin(admin.ModelAdmin):
-    list_display = ['user', 'startup', 'created_at']
-    list_filter = ['created_at', 'startup__industry']
-    search_fields = ['user__username', 'startup__name']
-    ordering = ['-created_at']
-    readonly_fields = ['created_at']
-
-# Customize admin site header and title
-admin.site.site_header = "StartupHub Administration"
-admin.site.site_title = "StartupHub Admin"
-admin.site.index_title = "Welcome to StartupHub Administration"
+# Customize admin site
+admin.site.site_header = "StartupHub Job Management"
+admin.site.site_title = "Job Admin"
+admin.site.index_title = "Job Administration Panel"
