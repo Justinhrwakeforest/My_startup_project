@@ -1,4 +1,4 @@
-# startup_hub/apps/startups/serializers.py - Complete file with edit request functionality
+# startup_hub/apps/startups/serializers.py - Complete file with cover image URL support
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -66,6 +66,7 @@ class StartupListSerializer(serializers.ModelSerializer):
     total_comments = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
     has_pending_edits = serializers.SerializerMethodField()
+    cover_image_display_url = serializers.ReadOnlyField()  # Add this field
     
     class Meta:
         model = Startup
@@ -75,7 +76,7 @@ class StartupListSerializer(serializers.ModelSerializer):
             'founded_year', 'is_featured', 'revenue', 'user_count', 'growth_rate',
             'views', 'average_rating', 'total_ratings', 'is_bookmarked', 'is_liked',
             'tags_list', 'created_at', 'total_likes', 'total_bookmarks', 'total_comments',
-            'cover_image_url', 'can_edit', 'has_pending_edits', 'is_approved',
+            'cover_image_url', 'cover_image_display_url', 'can_edit', 'has_pending_edits', 'is_approved',
             'contact_email', 'contact_phone', 'business_model', 'target_market'
         ]
     
@@ -232,7 +233,7 @@ class StartupCreateSerializer(serializers.ModelSerializer):
         fields = [
             'name', 'description', 'industry', 'location', 'website', 'logo',
             'funding_amount', 'valuation', 'employee_count', 'founded_year',
-            'revenue', 'user_count', 'growth_rate', 'cover_image_url', 
+            'revenue', 'user_count', 'growth_rate', 'cover_image_url',  # ADDED cover_image_url
             'is_featured', 'founders', 'tags', 'contact_email', 'contact_phone',
             'business_model', 'target_market'
         ]
@@ -284,6 +285,21 @@ class StartupCreateSerializer(serializers.ModelSerializer):
         """Validate website URL"""
         if value and not value.startswith(('http://', 'https://')):
             return f'https://{value}'
+        return value
+    
+    def validate_cover_image_url(self, value):
+        """Validate cover image URL"""
+        if value:
+            # Basic URL validation
+            if not value.startswith(('http://', 'https://')):
+                raise serializers.ValidationError("Cover image URL must start with http:// or https://")
+            
+            # Check if URL ends with common image extensions
+            valid_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
+            if not any(value.lower().endswith(ext) for ext in valid_extensions):
+                # Don't enforce this strictly, as some URLs might not have extensions
+                pass
+        
         return value
     
     def validate_founders(self, value):
@@ -396,12 +412,15 @@ class StartupDetailSerializer(StartupListSerializer):
     # Submitted by info
     submitted_by_username = serializers.CharField(source='submitted_by.username', read_only=True, allow_null=True)
     
+    # Social media field
+    social_media = serializers.JSONField(read_only=True)
+    
     class Meta(StartupListSerializer.Meta):
         fields = StartupListSerializer.Meta.fields + [
             'industry_detail', 'user_rating', 'founders', 'tags',
             'recent_ratings', 'recent_comments', 'open_jobs',
             'similar_startups', 'engagement_metrics', 'pending_edit_requests',
-            'submitted_by', 'submitted_by_username'
+            'submitted_by', 'submitted_by_username', 'social_media'
         ]
     
     def get_industry_detail(self, obj):
@@ -477,7 +496,8 @@ class StartupDetailSerializer(StartupListSerializer):
             'location': startup.location,
             'employee_count': startup.employee_count,
             'average_rating': startup.average_rating,
-            'is_featured': startup.is_featured
+            'is_featured': startup.is_featured,
+            'cover_image_url': startup.cover_image_url
         } for startup in similar]
     
     def get_engagement_metrics(self, obj):
