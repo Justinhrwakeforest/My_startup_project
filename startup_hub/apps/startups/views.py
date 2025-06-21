@@ -1,4 +1,4 @@
-# apps/startups/views.py - Complete Working Version
+# apps/startups/views.py - Complete Working Version with Edit Request Feature
 
 import logging
 from rest_framework import viewsets, status, filters
@@ -7,14 +7,20 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Avg, Count, Case, When, IntegerField, Min, Max
-from django.db import models
+from django.db import models, transaction
 from datetime import datetime, timedelta
 from django.utils import timezone
 from django.core.paginator import Paginator
-from .models import Industry, Startup, StartupRating, StartupComment, StartupBookmark, StartupLike
+from django.shortcuts import get_object_or_404
+from django.conf import settings
+from .models import (
+    Industry, Startup, StartupRating, StartupComment, StartupBookmark, StartupLike,
+    UserProfile, StartupEditRequest
+)
 from .serializers import (
     IndustrySerializer, StartupListSerializer, StartupDetailSerializer,
-    StartupRatingDetailSerializer, StartupCommentDetailSerializer, StartupCreateSerializer
+    StartupRatingDetailSerializer, StartupCommentDetailSerializer, StartupCreateSerializer,
+    StartupEditRequestSerializer, StartupEditRequestDetailSerializer
 )
 
 # Setup logging
@@ -138,6 +144,8 @@ class StartupViewSet(viewsets.ModelViewSet):
             return StartupCreateSerializer
         elif self.action == 'retrieve':
             return StartupDetailSerializer
+        elif self.action in ['edit_request', 'submit_edit']:
+            return StartupEditRequestSerializer
         return StartupListSerializer
     
     def get_permissions(self):
@@ -147,6 +155,9 @@ class StartupViewSet(viewsets.ModelViewSet):
             permission_classes = [IsAuthenticated]
         elif self.action in ['admin_list', 'admin_action', 'bulk_admin']:
             # Require authentication for admin actions
+            permission_classes = [IsAuthenticated]
+        elif self.action in ['submit_edit', 'edit_request']:
+            # Require authentication for edit requests
             permission_classes = [IsAuthenticated]
         else:
             permission_classes = [IsAuthenticatedOrReadOnly]
@@ -220,12 +231,142 @@ class StartupViewSet(viewsets.ModelViewSet):
             ).get(pk=instance.pk)
             
             serializer = self.get_serializer(optimized_instance)
+            
+            # Add edit permissions info
+            response_data = serializer.data
+            response_data['can_edit'] = optimized_instance.can_edit(request.user)
+            response_data['has_pending_edits'] = optimized_instance.has_pending_edits()
+            
             logger.info(f"✅ Startup retrieved successfully: {instance.name}")
-            return Response(serializer.data)
+            return Response(response_data)
             
         except Exception as e:
             logger.error(f"❌ Error retrieving startup: {str(e)}")
             return Response({'error': 'Startup not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # ==================== EDIT REQUEST ACTIONS ====================
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def submit_edit(self, request, pk=None):
+        """Submit an edit request for a startup"""
+        logger.info(f"✏️ Edit request for startup {pk} by user: {request.user}")
+        
+        startup = self.get_object()
+        
+        # Check if user can edit this startup
+        if not startup.can_edit(request.user):
+            logger.warning(f"❌ User {request.user} cannot edit startup {startup.name}")
+            return Response({
+                'error': 'You do not have permission to edit this startup. Only premium members who submitted the startup or admins can edit.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if user is admin/staff
+        is_admin = request.user.is_staff or request.user.is_superuser
+        
+        # Get the proposed changes
+        proposed_changes = request.data.get('changes', {})
+        
+        if not proposed_changes:
+            return Response({'error': 'No changes provided'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Remove fields that shouldn't be edited
+        protected_fields = ['id', 'created_at', 'updated_at', 'views', 'submitted_by', 'is_approved', 'is_featured']
+        for field in protected_fields:
+            proposed_changes.pop(field, None)
+        
+        try:
+            with transaction.atomic():
+                if is_admin:
+                    # Admin can directly update the startup
+                    logger.info(f"👑 Admin {request.user} directly updating startup {startup.name}")
+                    
+                    for field, value in proposed_changes.items():
+                        if hasattr(startup, field):
+                            setattr(startup, field, value)
+                    
+                    startup.save()
+                    
+                    # Return updated startup
+                    serializer = StartupDetailSerializer(startup, context={'request': request})
+                    
+                    return Response({
+                        'message': 'Startup updated successfully',
+                        'startup': serializer.data,
+                        'direct_update': True
+                    })
+                    
+                else:
+                    # Premium member - create edit request
+                    logger.info(f"📝 Creating edit request for startup {startup.name} by premium user {request.user}")
+                    
+                    # Check if user already has a pending edit request
+                    existing_pending = StartupEditRequest.objects.filter(
+                        startup=startup,
+                        requested_by=request.user,
+                        status='pending'
+                    ).first()
+                    
+                    if existing_pending:
+                        return Response({
+                            'error': 'You already have a pending edit request for this startup. Please wait for it to be reviewed.'
+                        }, status=status.HTTP_400_BAD_REQUEST)
+                    
+                    # Create original values dict
+                    original_values = {}
+                    for field in proposed_changes.keys():
+                        if hasattr(startup, field):
+                            original_values[field] = getattr(startup, field)
+                    
+                    # Create edit request
+                    edit_request = StartupEditRequest.objects.create(
+                        startup=startup,
+                        requested_by=request.user,
+                        proposed_changes=proposed_changes,
+                        original_values=original_values
+                    )
+                    
+                    logger.info(f"✅ Edit request created successfully (ID: {edit_request.id})")
+                    
+                    return Response({
+                        'message': 'Edit request submitted successfully. It will be reviewed by an admin.',
+                        'edit_request_id': edit_request.id,
+                        'status': 'pending'
+                    }, status=status.HTTP_201_CREATED)
+                    
+        except Exception as e:
+            logger.error(f"❌ Error processing edit request: {str(e)}")
+            return Response({
+                'error': 'Failed to process edit request',
+                'detail': str(e) if settings.DEBUG else 'Internal server error'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['get'], permission_classes=[IsAuthenticated])
+    def edit_requests(self, request, pk=None):
+        """Get edit requests for a startup"""
+        startup = self.get_object()
+        
+        # Check permissions - only admins or the startup submitter can view edit requests
+        if not (request.user.is_staff or request.user.is_superuser or request.user == startup.submitted_by):
+            return Response({
+                'error': 'You do not have permission to view edit requests for this startup'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get edit requests
+        edit_requests = startup.edit_requests.all().order_by('-created_at')
+        
+        # Filter by status if provided
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            edit_requests = edit_requests.filter(status=status_filter)
+        
+        # Paginate
+        page = self.paginate_queryset(edit_requests)
+        if page is not None:
+            serializer = StartupEditRequestDetailSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupEditRequestDetailSerializer(edit_requests, many=True)
+        return Response(serializer.data)
     
     # ==================== CUSTOM LIST ACTIONS ====================
     
@@ -256,6 +397,26 @@ class StartupViewSet(viewsets.ModelViewSet):
         ).order_by('-recent_activity', '-views')[:10]
         
         serializer = self.get_serializer(trending_startups, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def my_startups(self, request):
+        """Get startups submitted by the current user"""
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        logger.info(f"📁 My startups requested by user: {request.user}")
+        
+        # Get all startups submitted by user (including unapproved ones)
+        my_startups = Startup.objects.filter(submitted_by=request.user).order_by('-created_at')
+        
+        # Apply pagination
+        page = self.paginate_queryset(my_startups)
+        if page is not None:
+            serializer = StartupDetailSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupDetailSerializer(my_startups, many=True, context={'request': request})
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
@@ -601,6 +762,102 @@ class StartupViewSet(viewsets.ModelViewSet):
             logger.error(f"❌ Error performing bulk admin action: {str(e)}")
             return Response({'error': 'Failed to perform bulk action'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    # ==================== ADMIN EDIT REQUEST ACTIONS ====================
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='edit-requests')
+    def admin_edit_requests(self, request):
+        """Get all edit requests for admin review"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        logger.info(f"👑 Admin viewing all edit requests")
+        
+        # Get filter parameters
+        status_filter = request.query_params.get('status', 'pending')
+        startup_id = request.query_params.get('startup')
+        
+        # Base queryset
+        queryset = StartupEditRequest.objects.select_related('startup', 'requested_by', 'reviewed_by')
+        
+        # Apply filters
+        if status_filter != 'all':
+            queryset = queryset.filter(status=status_filter)
+        
+        if startup_id:
+            queryset = queryset.filter(startup_id=startup_id)
+        
+        # Order by most recent first
+        queryset = queryset.order_by('-created_at')
+        
+        # Paginate
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = StartupEditRequestDetailSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupEditRequestDetailSerializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='edit-requests/(?P<request_id>[^/.]+)/approve')
+    def approve_edit_request(self, request, request_id=None):
+        """Approve an edit request and apply changes"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            edit_request = get_object_or_404(StartupEditRequest, id=request_id, status='pending')
+            
+            logger.info(f"👑 Admin {request.user} approving edit request {request_id}")
+            
+            # Approve and apply changes
+            edit_request.approve(request.user)
+            
+            # Return updated startup
+            serializer = StartupDetailSerializer(edit_request.startup, context={'request': request})
+            
+            return Response({
+                'message': 'Edit request approved and changes applied successfully',
+                'startup': serializer.data
+            })
+            
+        except StartupEditRequest.DoesNotExist:
+            return Response({'error': 'Edit request not found or already processed'}, 
+                          status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"❌ Error approving edit request: {str(e)}")
+            return Response({'error': 'Failed to approve edit request'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='edit-requests/(?P<request_id>[^/.]+)/reject')
+    def reject_edit_request(self, request, request_id=None):
+        """Reject an edit request"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            edit_request = get_object_or_404(StartupEditRequest, id=request_id, status='pending')
+            
+            logger.info(f"👑 Admin {request.user} rejecting edit request {request_id}")
+            
+            # Get rejection notes
+            notes = request.data.get('notes', '')
+            
+            # Reject the request
+            edit_request.reject(request.user, notes)
+            
+            return Response({
+                'message': 'Edit request rejected successfully',
+                'edit_request_id': edit_request.id
+            })
+            
+        except StartupEditRequest.DoesNotExist:
+            return Response({'error': 'Edit request not found or already processed'}, 
+                          status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"❌ Error rejecting edit request: {str(e)}")
+            return Response({'error': 'Failed to reject edit request'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     # ==================== HELPER METHODS ====================
     
     def perform_create(self, serializer):
@@ -632,3 +889,39 @@ class StartupViewSet(viewsets.ModelViewSet):
         
         logger.info(f"🗑️ Deleting startup {instance.name} by {self.request.user}")
         instance.delete()
+
+
+class StartupEditRequestViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for viewing edit requests (read-only for non-admins)"""
+    queryset = StartupEditRequest.objects.all()
+    serializer_class = StartupEditRequestDetailSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Filter queryset based on user permissions"""
+        queryset = super().get_queryset()
+        
+        if self.request.user.is_staff or self.request.user.is_superuser:
+            # Admins can see all edit requests
+            return queryset
+        else:
+            # Regular users can only see their own edit requests
+            return queryset.filter(requested_by=self.request.user)
+    
+    @action(detail=False, methods=['get'])
+    def my_requests(self, request):
+        """Get edit requests submitted by the current user"""
+        my_requests = self.get_queryset().filter(requested_by=request.user).order_by('-created_at')
+        
+        # Filter by status if provided
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            my_requests = my_requests.filter(status=status_filter)
+        
+        page = self.paginate_queryset(my_requests)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(my_requests, many=True)
+        return Response(serializer.data)
