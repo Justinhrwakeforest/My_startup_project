@@ -1,8 +1,11 @@
-# apps/jobs/serializers.py - Fixed version without circular import
+# startup_hub/apps/jobs/serializers.py - Fixed version without syntax errors
 
 from rest_framework import serializers
 from django.db import models
-from .models import JobType, Job, JobSkill, JobApplication
+from django.contrib.auth import get_user_model
+from .models import JobType, Job, JobSkill, JobApplication, JobEditRequest
+
+User = get_user_model()
 
 class JobTypeSerializer(serializers.ModelSerializer):
     job_count = serializers.SerializerMethodField()
@@ -12,12 +15,17 @@ class JobTypeSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'job_count']
     
     def get_job_count(self, obj):
-        return obj.job_set.filter(is_active=True).count()
+        return obj.job_set.filter(is_active=True, status='active').count()
 
 class JobSkillSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobSkill
-        fields = ['id', 'skill']
+        fields = ['id', 'skill', 'is_required', 'proficiency_level']
+
+class JobSkillCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = JobSkill
+        fields = ['skill', 'is_required', 'proficiency_level']
 
 class JobListSerializer(serializers.ModelSerializer):
     startup_name = serializers.CharField(source='startup.name', read_only=True)
@@ -30,18 +38,23 @@ class JobListSerializer(serializers.ModelSerializer):
     posted_ago = serializers.ReadOnlyField()
     has_applied = serializers.SerializerMethodField()
     experience_level_display = serializers.CharField(source='get_experience_level_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
     days_since_posted = serializers.SerializerMethodField()
     application_count = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    posted_by_username = serializers.CharField(source='posted_by.username', read_only=True)
+    is_verified = serializers.ReadOnlyField()
     
     class Meta:
         model = Job
         fields = [
             'id', 'title', 'description', 'location', 'salary_range', 'is_remote',
-            'is_urgent', 'experience_level', 'experience_level_display', 'posted_at', 
-            'startup', 'startup_name', 'startup_logo', 'startup_location', 
-            'startup_industry', 'startup_employee_count', 'job_type', 'job_type_name',
-            'skills_list', 'posted_ago', 'has_applied', 'days_since_posted',
-            'application_count'
+            'is_urgent', 'experience_level', 'experience_level_display', 'status', 
+            'status_display', 'posted_at', 'startup', 'startup_name', 'startup_logo', 
+            'startup_location', 'startup_industry', 'startup_employee_count', 
+            'job_type', 'job_type_name', 'skills_list', 'posted_ago', 'has_applied', 
+            'days_since_posted', 'application_count', 'can_edit', 'posted_by_username',
+            'is_verified', 'view_count'
         ]
     
     def get_has_applied(self, obj):
@@ -57,21 +70,29 @@ class JobListSerializer(serializers.ModelSerializer):
     
     def get_application_count(self, obj):
         return obj.applications.count()
+    
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.can_user_edit(request.user)
+        return False
 
 class JobDetailSerializer(JobListSerializer):
-    # Use method field for startup_detail to avoid circular import
     startup_detail = serializers.SerializerMethodField()
     skills = JobSkillSerializer(many=True, read_only=True)
     similar_jobs = serializers.SerializerMethodField()
-    requirements = serializers.SerializerMethodField()
+    requirements_list = serializers.SerializerMethodField()
+    benefits_list = serializers.SerializerMethodField()
+    posted_by_info = serializers.SerializerMethodField()
     
     class Meta(JobListSerializer.Meta):
         fields = JobListSerializer.Meta.fields + [
-            'startup_detail', 'skills', 'similar_jobs', 'requirements'
+            'startup_detail', 'skills', 'similar_jobs', 'requirements', 'benefits',
+            'requirements_list', 'benefits_list', 'posted_by_info', 'company_email',
+            'application_deadline', 'expires_at'
         ]
     
     def get_startup_detail(self, obj):
-        """Get startup information without circular import"""
         startup = obj.startup
         return {
             'id': startup.id,
@@ -87,38 +108,247 @@ class JobDetailSerializer(JobListSerializer):
             'is_featured': startup.is_featured,
             'funding_amount': startup.funding_amount,
             'valuation': startup.valuation,
-            'average_rating': startup.average_rating,
-            'total_ratings': startup.total_ratings,
-            'views': startup.views,
+            'cover_image_display_url': getattr(startup, 'cover_image_display_url', None),
         }
     
     def get_similar_jobs(self, obj):
-        """Get similar jobs from the same company or with similar skills"""
         similar = Job.objects.filter(
             models.Q(startup=obj.startup) | 
             models.Q(skills__skill__in=obj.skills.values_list('skill', flat=True))
-        ).exclude(id=obj.id).filter(is_active=True).distinct()[:3]
+        ).exclude(id=obj.id).filter(is_active=True, status='active').distinct()[:3]
         
-        # Use a simple serializer to avoid infinite recursion
         return [{
             'id': job.id,
             'title': job.title,
             'startup_name': job.startup.name,
             'location': job.location,
-            'is_remote': job.is_remote
+            'is_remote': job.is_remote,
+            'posted_ago': job.posted_ago
         } for job in similar]
     
-    def get_requirements(self, obj):
-        """Extract job requirements from description"""
-        # This is a simple implementation - you could make this more sophisticated
+    def get_requirements_list(self, obj):
         requirements = []
-        if obj.skills.exists():
-            requirements.extend([skill.skill for skill in obj.skills.all()])
+        if obj.requirements:
+            # Split by line breaks and filter empty lines
+            requirements = [req.strip() for req in obj.requirements.split('\n') if req.strip()]
         
-        # Add experience level as a requirement
+        # Add skills as requirements
+        skills = [skill.skill for skill in obj.skills.all()]
+        if skills:
+            requirements.extend(skills)
+        
+        # Add experience level
         requirements.append(f"{obj.get_experience_level_display()} experience")
         
         return requirements
+    
+    def get_benefits_list(self, obj):
+        if obj.benefits:
+            return [benefit.strip() for benefit in obj.benefits.split('\n') if benefit.strip()]
+        return []
+    
+    def get_posted_by_info(self, obj):
+        request = self.context.get('request')
+        # Only show poster info to admins or the poster themselves
+        if request and request.user.is_authenticated:
+            if (request.user.is_staff or request.user.is_superuser or 
+                request.user == obj.posted_by):
+                return {
+                    'username': obj.posted_by.username,
+                    'email': obj.company_email,
+                    'is_verified': obj.is_verified
+                }
+        return None
+
+class JobCreateSerializer(serializers.ModelSerializer):
+    skills = serializers.ListField(
+        child=serializers.DictField(), 
+        write_only=True, 
+        required=False,
+        help_text="List of skill objects with skill, is_required, and proficiency_level"
+    )
+    
+    class Meta:
+        model = Job
+        fields = [
+            'title', 'description', 'startup', 'location', 'job_type', 'salary_range',
+            'is_remote', 'is_urgent', 'experience_level', 'requirements', 'benefits',
+            'application_deadline', 'expires_at', 'company_email', 'skills'
+        ]
+        extra_kwargs = {
+            'title': {'required': True},
+            'description': {'required': True},
+            'startup': {'required': True},
+            'location': {'required': True},
+            'job_type': {'required': True},
+            'company_email': {'required': True},
+        }
+    
+    def validate_title(self, value):
+        if len(value.strip()) < 5:
+            raise serializers.ValidationError("Job title must be at least 5 characters long")
+        if len(value) > 100:
+            raise serializers.ValidationError("Job title must be less than 100 characters")
+        return value.strip()
+    
+    def validate_description(self, value):
+        if len(value.strip()) < 50:
+            raise serializers.ValidationError("Job description must be at least 50 characters long")
+        if len(value) > 5000:
+            raise serializers.ValidationError("Job description must be less than 5000 characters")
+        return value.strip()
+    
+    def validate_company_email(self, value):
+        if not value or '@' not in value:
+            raise serializers.ValidationError("Please provide a valid company email address")
+        
+        # Basic email validation
+        import re
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, value):
+            raise serializers.ValidationError("Please provide a valid email address")
+        
+        return value.lower()
+    
+    def validate_startup(self, value):
+        if not value.is_approved:
+            raise serializers.ValidationError("Can only post jobs for approved startups")
+        return value
+    
+    def validate_skills(self, value):
+        if not value:
+            return []
+        
+        valid_skills = []
+        for skill_data in value:
+            if not isinstance(skill_data, dict):
+                raise serializers.ValidationError("Each skill must be an object")
+            
+            skill_name = skill_data.get('skill', '').strip()
+            if not skill_name:
+                continue
+            
+            if len(skill_name) > 30:
+                raise serializers.ValidationError("Skill name too long (max 30 characters)")
+            
+            is_required = skill_data.get('is_required', True)
+            proficiency_level = skill_data.get('proficiency_level', 'intermediate')
+            
+            if proficiency_level not in ['beginner', 'intermediate', 'advanced', 'expert']:
+                proficiency_level = 'intermediate'
+            
+            valid_skills.append({
+                'skill': skill_name,
+                'is_required': bool(is_required),
+                'proficiency_level': proficiency_level
+            })
+        
+        if len(valid_skills) > 20:
+            raise serializers.ValidationError("Maximum 20 skills allowed")
+        
+        return valid_skills
+    
+    def validate(self, attrs):
+        # Validate application deadline
+        application_deadline = attrs.get('application_deadline')
+        expires_at = attrs.get('expires_at')
+        
+        if application_deadline and expires_at:
+            if application_deadline >= expires_at:
+                raise serializers.ValidationError({
+                    'application_deadline': 'Application deadline must be before job expiry date'
+                })
+        
+        return attrs
+    
+    def create(self, validated_data):
+        skills_data = validated_data.pop('skills', [])
+        
+        # Set default values for approval workflow
+        validated_data['status'] = 'pending'
+        validated_data['is_active'] = False
+        validated_data['posted_by'] = self.context['request'].user
+        
+        # Create the job
+        job = Job.objects.create(**validated_data)
+        
+        # Verify company email
+        job.verify_company_email()
+        
+        # Create skills
+        for skill_data in skills_data:
+            JobSkill.objects.create(job=job, **skill_data)
+        
+        return job
+
+class JobEditSerializer(serializers.ModelSerializer):
+    skills = serializers.ListField(
+        child=serializers.DictField(), 
+        write_only=True, 
+        required=False
+    )
+    
+    class Meta:
+        model = Job
+        fields = [
+            'title', 'description', 'location', 'salary_range', 'is_remote', 
+            'is_urgent', 'experience_level', 'requirements', 'benefits',
+            'application_deadline', 'expires_at', 'skills'
+        ]
+    
+    def validate_title(self, value):
+        if len(value.strip()) < 5:
+            raise serializers.ValidationError("Job title must be at least 5 characters long")
+        return value.strip()
+    
+    def validate_description(self, value):
+        if len(value.strip()) < 50:
+            raise serializers.ValidationError("Job description must be at least 50 characters long")
+        return value.strip()
+    
+    def update(self, instance, validated_data):
+        skills_data = validated_data.pop('skills', None)
+        
+        # Check if job can be edited
+        if not instance.can_edit:
+            raise serializers.ValidationError("This job cannot be edited in its current status")
+        
+        # Update job fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        # If job was rejected, reset to pending when edited
+        if instance.status == 'rejected':
+            instance.status = 'pending'
+        
+        instance.save()
+        
+        # Update skills if provided
+        if skills_data is not None:
+            # Clear existing skills
+            instance.skills.all().delete()
+            
+            # Create new skills
+            for skill_data in skills_data:
+                if skill_data.get('skill'):
+                    JobSkill.objects.create(job=instance, **skill_data)
+        
+        return instance
+
+class JobEditRequestSerializer(serializers.ModelSerializer):
+    changes_display = serializers.SerializerMethodField(read_only=True)
+    job_title = serializers.CharField(source='job.title', read_only=True)
+    
+    class Meta:
+        model = JobEditRequest
+        fields = [
+            'id', 'job', 'job_title', 'requested_by', 'status', 'proposed_changes',
+            'original_values', 'changes_display', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'requested_by', 'status', 'original_values', 'created_at', 'updated_at']
+    
+    def get_changes_display(self, obj):
+        return obj.get_changes_display() if hasattr(obj, 'get_changes_display') else []
 
 class JobApplicationSerializer(serializers.ModelSerializer):
     job_title = serializers.CharField(source='job.title', read_only=True)
@@ -135,3 +365,39 @@ class JobApplicationSerializer(serializers.ModelSerializer):
             'applied_at'
         ]
         read_only_fields = ['status', 'applied_at']
+
+class MyJobsSerializer(serializers.ModelSerializer):
+    """Serializer for jobs posted by the current user"""
+    startup_name = serializers.CharField(source='startup.name', read_only=True)
+    job_type_name = serializers.CharField(source='job_type.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    application_count = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    approval_info = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Job
+        fields = [
+            'id', 'title', 'startup', 'startup_name', 'job_type_name', 'location',
+            'status', 'status_display', 'is_active', 'is_verified', 'posted_at',
+            'view_count', 'application_count', 'can_edit', 'approval_info'
+        ]
+    
+    def get_application_count(self, obj):
+        return obj.applications.count()
+    
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.can_user_edit(request.user)
+        return False
+    
+    def get_approval_info(self, obj):
+        info = {
+            'is_verified': obj.is_verified,
+            'approved_at': obj.approved_at,
+            'rejection_reason': obj.rejection_reason
+        }
+        if obj.approved_by:
+            info['approved_by'] = obj.approved_by.username
+        return info
