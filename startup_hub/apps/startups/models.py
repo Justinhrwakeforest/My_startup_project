@@ -1,12 +1,24 @@
-# startup_hub/apps/startups/models.py - Complete file with edit request functionality
+# startup_hub/apps/startups/models.py - Complete file with edit request functionality and image support
 
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 import json
+import os
+from uuid import uuid4
 
 User = get_user_model()
+
+def startup_cover_image_path(instance, filename):
+    """Generate upload path for startup cover images"""
+    # Get file extension
+    ext = filename.split('.')[-1]
+    # Generate unique filename
+    filename = f'{uuid4().hex}.{ext}'
+    
+    # Return the full path
+    return os.path.join('startup_covers', str(instance.id), filename)
 
 class Industry(models.Model):
     name = models.CharField(max_length=50, unique=True)
@@ -48,7 +60,19 @@ class Startup(models.Model):
     location = models.CharField(max_length=100)
     website = models.URLField(blank=True)
     logo = models.CharField(max_length=10, default='🚀')  # Emoji logo
-    cover_image_url = models.URLField(blank=True, null=True, help_text='URL to cover image')
+    
+    # Cover image support - both file upload and URL
+    cover_image = models.ImageField(
+        upload_to=startup_cover_image_path, 
+        blank=True, 
+        null=True,
+        help_text='Upload a cover image for the startup'
+    )
+    cover_image_url = models.URLField(
+        blank=True, 
+        null=True, 
+        help_text='Or provide a URL to an external cover image'
+    )
     
     # Financial info
     funding_amount = models.CharField(max_length=20, blank=True)
@@ -77,6 +101,9 @@ class Startup(models.Model):
     business_model = models.CharField(max_length=50, blank=True)
     target_market = models.CharField(max_length=100, blank=True)
     
+    # Social media fields (JSON field to store multiple social links)
+    social_media = models.JSONField(default=dict, blank=True, help_text='Social media links as JSON')
+    
     def __str__(self):
         return self.name
     
@@ -90,6 +117,15 @@ class Startup(models.Model):
     @property
     def total_ratings(self):
         return self.ratings.count()
+    
+    @property
+    def cover_image_display_url(self):
+        """Get the cover image URL (either uploaded file or external URL)"""
+        if self.cover_image:
+            return self.cover_image.url
+        elif self.cover_image_url:
+            return self.cover_image_url
+        return None
     
     def can_edit(self, user):
         """Check if user can edit this startup"""
@@ -113,6 +149,14 @@ class Startup(models.Model):
     def has_pending_edits(self):
         """Check if there are pending edit requests"""
         return self.edit_requests.filter(status='pending').exists()
+    
+    def save(self, *args, **kwargs):
+        """Override save to handle cover image"""
+        # If we have a file upload, clear the URL field
+        if self.cover_image:
+            self.cover_image_url = ''
+        
+        super().save(*args, **kwargs)
     
     class Meta:
         ordering = ['-created_at']
