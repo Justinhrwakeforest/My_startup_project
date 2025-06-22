@@ -253,3 +253,89 @@ class StartupListSerializer(serializers.ModelSerializer):
     
     def get_has_pending_claims(self, obj):
         return obj.has_pending_claims()
+    
+# Add these serializers to the END of your serializers.py file
+
+# Detailed serializers for ratings and comments
+class StartupRatingDetailSerializer(StartupRatingSerializer):
+    """Detailed serializer for startup ratings"""
+    pass  # Uses the same structure as base StartupRatingSerializer
+
+class StartupCommentDetailSerializer(StartupCommentSerializer):
+    """Detailed serializer for startup comments"""
+    pass  # Uses the same structure as base StartupCommentSerializer
+
+# Create serializer for new startups
+class StartupCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating new startups"""
+    founders = StartupFounderSerializer(many=True, required=False)
+    tags = serializers.ListField(child=serializers.CharField(max_length=50), required=False)
+    
+    class Meta:
+        model = Startup
+        fields = [
+            'name', 'description', 'industry', 'location', 'website', 'logo',
+            'funding_amount', 'valuation', 'employee_count', 'founded_year',
+            'revenue', 'user_count', 'growth_rate', 'contact_email', 'contact_phone',
+            'business_model', 'target_market', 'cover_image_url', 'founders', 'tags'
+        ]
+    
+    def create(self, validated_data):
+        founders_data = validated_data.pop('founders', [])
+        tags_data = validated_data.pop('tags', [])
+        
+        # Create startup
+        startup = Startup.objects.create(**validated_data)
+        
+        # Create founders
+        for founder_data in founders_data:
+            StartupFounder.objects.create(startup=startup, **founder_data)
+        
+        # Create tags
+        for tag_name in tags_data:
+            if tag_name.strip():
+                StartupTag.objects.create(startup=startup, tag=tag_name.strip())
+        
+        return startup
+
+# Detail serializer that extends the list serializer with more fields
+class StartupDetailSerializer(StartupListSerializer):
+    """Detailed serializer for startup detail view"""
+    founders = StartupFounderSerializer(many=True, read_only=True)
+    tags = StartupTagSerializer(many=True, read_only=True)
+    ratings = StartupRatingSerializer(many=True, read_only=True)
+    comments = StartupCommentSerializer(many=True, read_only=True)
+    submitted_by_username = serializers.CharField(source='submitted_by.username', read_only=True)
+    
+    class Meta(StartupListSerializer.Meta):
+        fields = StartupListSerializer.Meta.fields + [
+            'founders', 'tags', 'ratings', 'comments', 'submitted_by_username',
+            'social_media', 'updated_at'
+        ]
+
+# Edit Request Serializers
+class StartupEditRequestSerializer(serializers.ModelSerializer):
+    """Serializer for creating edit requests"""
+    startup_name = serializers.CharField(source='startup.name', read_only=True)
+    requested_by_username = serializers.CharField(source='requested_by.username', read_only=True)
+    
+    class Meta:
+        model = StartupEditRequest
+        fields = [
+            'id', 'startup', 'startup_name', 'requested_by', 'requested_by_username',
+            'proposed_changes', 'status', 'created_at'
+        ]
+        read_only_fields = ['id', 'requested_by', 'status', 'created_at']
+
+class StartupEditRequestDetailSerializer(StartupEditRequestSerializer):
+    """Detailed serializer for edit requests"""
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True, allow_null=True)
+    
+    class Meta(StartupEditRequestSerializer.Meta):
+        fields = StartupEditRequestSerializer.Meta.fields + [
+            'original_values', 'reviewed_by', 'reviewed_by_username', 
+            'reviewed_at', 'review_notes', 'updated_at'
+        ]
+        read_only_fields = StartupEditRequestSerializer.Meta.read_only_fields + [
+            'original_values', 'reviewed_by', 'reviewed_at', 'review_notes', 'updated_at'
+        ]
