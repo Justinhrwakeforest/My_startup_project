@@ -1,4 +1,4 @@
-# apps/startups/views.py - Complete Working Version with Edit Request Feature and Industry ForeignKey Fix
+# apps/startups/views.py - Complete Working Version with Startup Claiming Feature
 
 import logging
 from rest_framework import viewsets, status, filters
@@ -13,14 +13,18 @@ from django.utils import timezone
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404
 from django.conf import settings
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
 from .models import (
     Industry, Startup, StartupRating, StartupComment, StartupBookmark, StartupLike,
-    UserProfile, StartupEditRequest
+    UserProfile, StartupEditRequest, StartupClaimRequest
 )
 from .serializers import (
     IndustrySerializer, StartupListSerializer, StartupDetailSerializer,
     StartupRatingDetailSerializer, StartupCommentDetailSerializer, StartupCreateSerializer,
-    StartupEditRequestSerializer, StartupEditRequestDetailSerializer
+    StartupEditRequestSerializer, StartupEditRequestDetailSerializer,
+    StartupClaimRequestSerializer, StartupClaimRequestDetailSerializer
 )
 
 # Setup logging
@@ -36,7 +40,7 @@ class IndustryViewSet(viewsets.ReadOnlyModelViewSet):
         return super().list(request, *args, **kwargs)
 
 class StartupViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing startups with full CRUD operations"""
+    """ViewSet for managing startups with full CRUD operations and claiming"""
     
     # Base queryset - only approved startups for public viewing
     queryset = Startup.objects.filter(is_approved=True).select_related('industry').prefetch_related(
@@ -62,8 +66,8 @@ class StartupViewSet(viewsets.ModelViewSet):
             # For create/update/delete, show all startups (with proper permissions)
             queryset = Startup.objects.all()
             
-        queryset = queryset.select_related('industry').prefetch_related(
-            'founders', 'tags', 'ratings', 'comments', 'likes', 'bookmarks'
+        queryset = queryset.select_related('industry', 'claimed_by').prefetch_related(
+            'founders', 'tags', 'ratings', 'comments', 'likes', 'bookmarks', 'claim_requests'
         )
         
         params = self.request.query_params
@@ -136,6 +140,13 @@ class StartupViewSet(viewsets.ModelViewSet):
         if featured_only == 'true':
             queryset = queryset.filter(is_featured=True)
         
+        # Claimed filter
+        claimed_only = params.get('claimed')
+        if claimed_only == 'true':
+            queryset = queryset.filter(is_claimed=True, claim_verified=True)
+        elif claimed_only == 'false':
+            queryset = queryset.filter(Q(is_claimed=False) | Q(claim_verified=False))
+        
         return queryset
     
     def get_serializer_class(self):
@@ -146,6 +157,8 @@ class StartupViewSet(viewsets.ModelViewSet):
             return StartupDetailSerializer
         elif self.action in ['edit_request', 'submit_edit']:
             return StartupEditRequestSerializer
+        elif self.action in ['claim_startup', 'verify_claim']:
+            return StartupClaimRequestSerializer
         return StartupListSerializer
     
     def get_permissions(self):
@@ -158,6 +171,9 @@ class StartupViewSet(viewsets.ModelViewSet):
             permission_classes = [IsAuthenticated]
         elif self.action in ['submit_edit', 'edit_request', 'upload_cover_image', 'test_edit']:
             # Require authentication for edit requests
+            permission_classes = [IsAuthenticated]
+        elif self.action in ['claim_startup', 'verify_claim', 'my_claims']:
+            # Require authentication for claiming
             permission_classes = [IsAuthenticated]
         else:
             permission_classes = [IsAuthenticatedOrReadOnly]
@@ -221,13 +237,16 @@ class StartupViewSet(viewsets.ModelViewSet):
             instance.save(update_fields=['views'])
             
             # Use optimized queryset for detail view
-            optimized_instance = Startup.objects.select_related('industry').prefetch_related(
+            optimized_instance = Startup.objects.select_related(
+                'industry', 'claimed_by', 'submitted_by'
+            ).prefetch_related(
                 'founders',
                 'tags',
                 'ratings__user',
                 'comments__user',
                 'likes__user',
-                'bookmarks__user'
+                'bookmarks__user',
+                'claim_requests__user'
             ).get(pk=instance.pk)
             
             serializer = self.get_serializer(optimized_instance)
@@ -235,7 +254,9 @@ class StartupViewSet(viewsets.ModelViewSet):
             # Add edit permissions info
             response_data = serializer.data
             response_data['can_edit'] = optimized_instance.can_edit(request.user)
+            response_data['can_claim'] = optimized_instance.can_claim(request.user)
             response_data['has_pending_edits'] = optimized_instance.has_pending_edits()
+            response_data['has_pending_claims'] = optimized_instance.has_pending_claims()
             
             logger.info(f"Startup retrieved successfully: {instance.name}")
             return Response(response_data)
@@ -244,38 +265,158 @@ class StartupViewSet(viewsets.ModelViewSet):
             logger.error(f"Error retrieving startup: {str(e)}")
             return Response({'error': 'Startup not found'}, status=status.HTTP_404_NOT_FOUND)
     
-    # ==================== TEST ENDPOINT ====================
+    # ==================== STARTUP CLAIMING ACTIONS ====================
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def test_edit(self, request, pk=None):
-        """Simple test endpoint to verify edit functionality"""
+    def claim_startup(self, request, pk=None):
+        """Submit a claim request for a startup"""
+        logger.info(f"Claim request for startup {pk} by user: {request.user}")
+        
         try:
             startup = self.get_object()
             
-            # Log the request data
-            print(f"TEST: Test edit request for startup {pk}")
-            print(f"TEST: Request data: {request.data}")
-            print(f"TEST: User: {request.user}")
-            print(f"TEST: User can edit: {startup.can_edit(request.user)}")
-            print(f"TEST: User is admin: {request.user.is_staff or request.user.is_superuser}")
+            # Check if user can claim this startup
+            if not startup.can_claim(request.user):
+                reasons = []
+                if startup.is_claimed and startup.claim_verified:
+                    reasons.append("This startup is already claimed and verified")
+                if startup.claim_requests.filter(user=request.user, status='pending').exists():
+                    reasons.append("You already have a pending claim request for this startup")
+                
+                return Response({
+                    'error': 'Cannot claim this startup',
+                    'reasons': reasons
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate request data
+            serializer = StartupClaimRequestSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Create claim request
+            claim_request = serializer.save(
+                startup=startup,
+                user=request.user
+            )
+            
+            # Send verification email
+            try:
+                self.send_claim_verification_email(claim_request)
+                logger.info(f"Verification email sent for claim request {claim_request.id}")
+            except Exception as email_error:
+                logger.error(f"Failed to send verification email: {str(email_error)}")
+                # Don't fail the request if email fails
             
             return Response({
-                'message': 'Test edit endpoint working!',
-                'startup_id': pk,
-                'startup_name': startup.name,
-                'user_can_edit': startup.can_edit(request.user),
-                'request_data': request.data,
-                'user': str(request.user),
-                'is_admin': request.user.is_staff or request.user.is_superuser,
-                'test_success': True
-            })
+                'message': 'Claim request submitted successfully! Please check your email to verify your company email address.',
+                'claim_request_id': claim_request.id,
+                'verification_required': True,
+                'email_sent_to': claim_request.email
+            }, status=status.HTTP_201_CREATED)
             
         except Exception as e:
-            print(f"ERROR: Error in test edit: {str(e)}")
+            logger.error(f"Error processing claim request: {str(e)}")
             return Response({
-                'error': str(e),
-                'test_success': False
+                'error': 'Failed to process claim request',
+                'detail': str(e) if settings.DEBUG else 'Internal server error'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'], permission_classes=[])
+    def verify_claim(self, request):
+        """Verify email for claim request"""
+        logger.info(f"Email verification attempt")
+        
+        verification_token = request.data.get('token')
+        if not verification_token:
+            return Response({
+                'error': 'Verification token is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            claim_request = StartupClaimRequest.objects.get(
+                verification_token=verification_token,
+                email_verified=False
+            )
+            
+            # Check if token has expired
+            if claim_request.is_expired():
+                claim_request.mark_expired()
+                return Response({
+                    'error': 'Verification link has expired. Please submit a new claim request.',
+                    'expired': True
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Verify email
+            claim_request.verify_email()
+            
+            logger.info(f"Email verified for claim request {claim_request.id}")
+            
+            return Response({
+                'message': 'Email verified successfully! Your claim request is now pending admin review.',
+                'verified': True,
+                'claim_request_id': claim_request.id,
+                'startup_name': claim_request.startup.name
+            })
+            
+        except StartupClaimRequest.DoesNotExist:
+            return Response({
+                'error': 'Invalid or already used verification token'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error verifying claim: {str(e)}")
+            return Response({
+                'error': 'Failed to verify claim request'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def my_claims(self, request):
+        """Get current user's claim requests"""
+        logger.info(f"Getting claim requests for user: {request.user}")
+        
+        claim_requests = StartupClaimRequest.objects.filter(
+            user=request.user
+        ).select_related('startup').order_by('-created_at')
+        
+        # Filter by status if provided
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            claim_requests = claim_requests.filter(status=status_filter)
+        
+        # Paginate
+        page = self.paginate_queryset(claim_requests)
+        if page is not None:
+            serializer = StartupClaimRequestDetailSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupClaimRequestDetailSerializer(claim_requests, many=True)
+        return Response(serializer.data)
+    
+    def send_claim_verification_email(self, claim_request):
+        """Send verification email for claim request"""
+        verification_url = f"{settings.FRONTEND_URL}/verify-claim?token={claim_request.verification_token}"
+        
+        context = {
+            'user_name': claim_request.user.get_full_name() or claim_request.user.username,
+            'startup_name': claim_request.startup.name,
+            'verification_url': verification_url,
+            'position': claim_request.position,
+            'expires_at': claim_request.expires_at,
+        }
+        
+        subject = f'Verify your claim for {claim_request.startup.name} on StartupHub'
+        
+        # Render HTML and text versions
+        html_message = render_to_string('emails/verify_claim.html', context)
+        plain_message = strip_tags(html_message)
+        
+        send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[claim_request.email],
+            html_message=html_message,
+            fail_silently=False,
+        )
     
     # ==================== EDIT REQUEST ACTIONS ====================
     
@@ -297,11 +438,13 @@ class StartupViewSet(viewsets.ModelViewSet):
             if not startup.can_edit(request.user):
                 logger.warning(f"User {request.user} cannot edit startup {startup.name}")
                 return Response({
-                    'error': 'You do not have permission to edit this startup. Only premium members who submitted the startup or admins can edit.'
+                    'error': 'You do not have permission to edit this startup. Only verified company representatives, premium members who submitted the startup, or admins can edit.'
                 }, status=status.HTTP_403_FORBIDDEN)
             
-            # Check if user is admin/staff
+            # Check if user is admin/staff or verified company rep
             is_admin = request.user.is_staff or request.user.is_superuser
+            is_verified_rep = (startup.is_claimed and startup.claim_verified and 
+                             startup.claimed_by == request.user)
             
             # Get the proposed changes
             proposed_changes = request.data.get('changes', {})
@@ -352,9 +495,9 @@ class StartupViewSet(viewsets.ModelViewSet):
                 proposed_changes.pop('social_media')
 
             with transaction.atomic():
-                if is_admin:
-                    # Admin can directly update the startup
-                    logger.info(f"Admin {request.user} directly updating startup {startup.name}")
+                if is_admin or is_verified_rep:
+                    # Admin or verified company rep can directly update the startup
+                    logger.info(f"{'Admin' if is_admin else 'Verified company rep'} {request.user} directly updating startup {startup.name}")
                     
                     for field, value in proposed_changes.items():
                         if hasattr(startup, field):
@@ -525,8 +668,9 @@ class StartupViewSet(viewsets.ModelViewSet):
         """Get edit requests for a startup"""
         startup = self.get_object()
         
-        # Check permissions - only admins or the startup submitter can view edit requests
-        if not (request.user.is_staff or request.user.is_superuser or request.user == startup.submitted_by):
+        # Check permissions - only admins, the startup submitter, or verified company rep can view edit requests
+        if not (request.user.is_staff or request.user.is_superuser or 
+                request.user == startup.submitted_by or request.user == startup.claimed_by):
             return Response({
                 'error': 'You do not have permission to view edit requests for this startup'
             }, status=status.HTTP_403_FORBIDDEN)
@@ -597,6 +741,29 @@ class StartupViewSet(viewsets.ModelViewSet):
             return self.get_paginated_response(serializer.data)
         
         serializer = StartupDetailSerializer(my_startups, many=True, context={'request': request})
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def my_claimed_startups(self, request):
+        """Get startups claimed by the current user"""
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        logger.info(f"My claimed startups requested by user: {request.user}")
+        
+        # Get all startups claimed by user
+        claimed_startups = Startup.objects.filter(
+            claimed_by=request.user, 
+            claim_verified=True
+        ).order_by('-created_at')
+        
+        # Apply pagination
+        page = self.paginate_queryset(claimed_startups)
+        if page is not None:
+            serializer = StartupDetailSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupDetailSerializer(claimed_startups, many=True, context={'request': request})
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
@@ -831,8 +998,10 @@ class StartupViewSet(viewsets.ModelViewSet):
         search = request.query_params.get('search', '')
         
         # Get all startups without approval filter for admin
-        queryset = Startup.objects.all().select_related('industry', 'submitted_by').prefetch_related(
-            'founders', 'tags'
+        queryset = Startup.objects.all().select_related(
+            'industry', 'submitted_by', 'claimed_by'
+        ).prefetch_related(
+            'founders', 'tags', 'claim_requests'
         )
         
         # Apply filters
@@ -842,6 +1011,10 @@ class StartupViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_approved=True, is_featured=False)
         elif filter_type == 'featured':
             queryset = queryset.filter(is_featured=True)
+        elif filter_type == 'claimed':
+            queryset = queryset.filter(is_claimed=True, claim_verified=True)
+        elif filter_type == 'pending_claims':
+            queryset = queryset.filter(claim_requests__status='pending').distinct()
         
         # Apply search
         if search:
@@ -941,6 +1114,111 @@ class StartupViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Error performing bulk admin action: {str(e)}")
             return Response({'error': 'Failed to perform bulk action'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    # ==================== ADMIN CLAIM REQUEST ACTIONS ====================
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='admin/claim-requests')
+    def admin_claim_requests(self, request):
+        """Get all claim requests for admin review"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        logger.info(f"Admin viewing all claim requests")
+        
+        # Get filter parameters
+        status_filter = request.query_params.get('status', 'pending')
+        startup_id = request.query_params.get('startup')
+        
+        # Base queryset
+        queryset = StartupClaimRequest.objects.select_related('startup', 'user', 'reviewed_by')
+        
+        # Apply filters
+        if status_filter != 'all':
+            queryset = queryset.filter(status=status_filter)
+        
+        if startup_id:
+            queryset = queryset.filter(startup_id=startup_id)
+        
+        # Order by most recent first
+        queryset = queryset.order_by('-created_at')
+        
+        # Paginate
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = StartupClaimRequestDetailSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = StartupClaimRequestDetailSerializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='admin/claim-requests/(?P<request_id>[^/.]+)/approve')
+    def approve_claim_request(self, request, request_id=None):
+        """Approve a claim request"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            claim_request = get_object_or_404(
+                StartupClaimRequest, 
+                id=request_id, 
+                status='pending',
+                email_verified=True
+            )
+            
+            logger.info(f"Admin {request.user} approving claim request {request_id}")
+            
+            # Get approval notes
+            notes = request.data.get('notes', '')
+            
+            # Approve the claim
+            claim_request.approve(request.user, notes)
+            
+            # Return updated startup
+            serializer = StartupDetailSerializer(claim_request.startup, context={'request': request})
+            
+            return Response({
+                'message': 'Claim request approved successfully',
+                'startup': serializer.data,
+                'claimed_by': claim_request.user.username
+            })
+            
+        except StartupClaimRequest.DoesNotExist:
+            return Response({'error': 'Claim request not found, already processed, or email not verified'}, 
+                          status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error approving claim request: {str(e)}")
+            return Response({'error': 'Failed to approve claim request'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated], url_path='admin/claim-requests/(?P<request_id>[^/.]+)/reject')
+    def reject_claim_request(self, request, request_id=None):
+        """Reject a claim request"""
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            claim_request = get_object_or_404(StartupClaimRequest, id=request_id, status='pending')
+            
+            logger.info(f"Admin {request.user} rejecting claim request {request_id}")
+            
+            # Get rejection notes
+            notes = request.data.get('notes', '')
+            
+            # Reject the request
+            claim_request.reject(request.user, notes)
+            
+            return Response({
+                'message': 'Claim request rejected successfully',
+                'claim_request_id': claim_request.id
+            })
+            
+        except StartupClaimRequest.DoesNotExist:
+            return Response({'error': 'Claim request not found or already processed'}, 
+                          status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error rejecting claim request: {str(e)}")
+            return Response({'error': 'Failed to reject claim request'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     # ==================== ADMIN EDIT REQUEST ACTIONS ====================
     
@@ -1048,9 +1326,10 @@ class StartupViewSet(viewsets.ModelViewSet):
     
     def perform_update(self, serializer):
         """Called when updating a startup instance"""
-        # Only allow the submitter or admin to update
+        # Only allow the submitter, verified company rep, or admin to update
         startup = self.get_object()
         if not (self.request.user == startup.submitted_by or 
+                self.request.user == startup.claimed_by or
                 self.request.user.is_staff or 
                 self.request.user.is_superuser):
             from rest_framework.exceptions import PermissionDenied
@@ -1060,8 +1339,9 @@ class StartupViewSet(viewsets.ModelViewSet):
     
     def perform_destroy(self, instance):
         """Called when deleting a startup instance"""
-        # Only allow the submitter or admin to delete
+        # Only allow the submitter, verified company rep, or admin to delete
         if not (self.request.user == instance.submitted_by or 
+                self.request.user == instance.claimed_by or
                 self.request.user.is_staff or 
                 self.request.user.is_superuser):
             from rest_framework.exceptions import PermissionDenied
@@ -1092,6 +1372,42 @@ class StartupEditRequestViewSet(viewsets.ReadOnlyModelViewSet):
     def my_requests(self, request):
         """Get edit requests submitted by the current user"""
         my_requests = self.get_queryset().filter(requested_by=request.user).order_by('-created_at')
+        
+        # Filter by status if provided
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            my_requests = my_requests.filter(status=status_filter)
+        
+        page = self.paginate_queryset(my_requests)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(my_requests, many=True)
+        return Response(serializer.data)
+
+
+class StartupClaimRequestViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for viewing claim requests (read-only for non-admins)"""
+    queryset = StartupClaimRequest.objects.all()
+    serializer_class = StartupClaimRequestDetailSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Filter queryset based on user permissions"""
+        queryset = super().get_queryset()
+        
+        if self.request.user.is_staff or self.request.user.is_superuser:
+            # Admins can see all claim requests
+            return queryset
+        else:
+            # Regular users can only see their own claim requests
+            return queryset.filter(user=self.request.user)
+    
+    @action(detail=False, methods=['get'])
+    def my_requests(self, request):
+        """Get claim requests submitted by the current user"""
+        my_requests = self.get_queryset().filter(user=request.user).order_by('-created_at')
         
         # Filter by status if provided
         status_filter = request.query_params.get('status')
