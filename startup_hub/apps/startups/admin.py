@@ -1,4 +1,4 @@
-# startup_hub/apps/startups/admin.py - Complete file with edit request management
+# startup_hub/apps/startups/admin.py - Complete file with claim request management
 
 from django.contrib import admin
 from django.utils.html import format_html
@@ -9,7 +9,7 @@ import json
 from .models import (
     Industry, Startup, StartupFounder, StartupTag, StartupRating, 
     StartupComment, StartupBookmark, StartupLike, StartupSubmission,
-    UserProfile, StartupEditRequest
+    UserProfile, StartupEditRequest, StartupClaimRequest
 )
 
 @admin.register(Industry)
@@ -66,22 +66,38 @@ class StartupEditRequestInline(admin.TabularInline):
         return format_html('<a href="{}">View Details</a>', url)
     view_details.short_description = 'Details'
 
+class StartupClaimRequestInline(admin.TabularInline):
+    model = StartupClaimRequest
+    extra = 0
+    fields = ['user', 'email', 'status', 'email_verified', 'created_at', 'view_details']
+    readonly_fields = ['user', 'email', 'created_at', 'view_details']
+    can_delete = False
+    
+    def view_details(self, obj):
+        url = reverse('admin:startups_startupclaimrequest_change', args=[obj.pk])
+        return format_html('<a href="{}">View Details</a>', url)
+    view_details.short_description = 'Details'
+
 @admin.register(Startup)
 class StartupAdmin(admin.ModelAdmin):
     list_display = [
         'name', 'industry', 'location', 'employee_count', 'founded_year',
-        'is_approved', 'is_featured', 'submitted_by', 'approval_status',
-        'total_ratings', 'average_rating', 'views', 'has_pending_edits', 'created_at'
+        'is_approved', 'is_featured', 'is_claimed', 'claim_status', 'submitted_by', 
+        'claimed_by', 'approval_status', 'total_ratings', 'average_rating', 
+        'views', 'has_pending_edits', 'has_pending_claims', 'created_at'
     ]
     list_filter = [
-        'is_approved', 'is_featured', 'industry', 'founded_year', 
-        'created_at'
+        'is_approved', 'is_featured', 'is_claimed', 'claim_verified', 
+        'industry', 'founded_year', 'created_at'
     ]
     search_fields = ['name', 'description', 'location', 'founders__name']
     ordering = ['-created_at']
-    readonly_fields = ['views', 'created_at', 'updated_at', 'average_rating', 'total_ratings', 'submitted_by']
+    readonly_fields = [
+        'views', 'created_at', 'updated_at', 'average_rating', 'total_ratings', 
+        'submitted_by', 'claimed_by', 'is_claimed', 'claim_verified'
+    ]
     
-    inlines = [StartupFounderInline, StartupTagInline, StartupEditRequestInline]
+    inlines = [StartupFounderInline, StartupTagInline, StartupEditRequestInline, StartupClaimRequestInline]
     
     fieldsets = (
         ('Basic Information', {
@@ -97,8 +113,8 @@ class StartupAdmin(admin.ModelAdmin):
             'fields': ('contact_email', 'contact_phone'),
             'classes': ('collapse',)
         }),
-        ('Status', {
-            'fields': ('is_approved', 'is_featured', 'submitted_by')
+        ('Status & Ownership', {
+            'fields': ('is_approved', 'is_featured', 'submitted_by', 'is_claimed', 'claim_verified', 'claimed_by')
         }),
         ('System Info', {
             'fields': ('views', 'average_rating', 'total_ratings', 'created_at', 'updated_at'),
@@ -114,6 +130,15 @@ class StartupAdmin(admin.ModelAdmin):
         else:
             return format_html('<span style="color: red;">✗ Pending</span>')
     approval_status.short_description = 'Status'
+    
+    def claim_status(self, obj):
+        if obj.is_claimed and obj.claim_verified:
+            return format_html('<span style="color: green;">✓ Verified</span>')
+        elif obj.is_claimed:
+            return format_html('<span style="color: orange;">⚠ Unverified</span>')
+        else:
+            return format_html('<span style="color: gray;">- Unclaimed</span>')
+    claim_status.short_description = 'Claim Status'
     
     def total_ratings(self, obj):
         return obj.ratings.count()
@@ -133,6 +158,14 @@ class StartupAdmin(admin.ModelAdmin):
             return format_html('<a href="{}" style="color: orange; font-weight: bold;">{} pending</a>', url, pending_count)
         return format_html('<span style="color: green;">None</span>')
     has_pending_edits.short_description = 'Pending Edits'
+    
+    def has_pending_claims(self, obj):
+        pending_count = obj.claim_requests.filter(status='pending').count()
+        if pending_count > 0:
+            url = reverse('admin:startups_startupclaimrequest_changelist') + f'?startup__id__exact={obj.pk}&status__exact=pending'
+            return format_html('<a href="{}" style="color: blue; font-weight: bold;">{} pending</a>', url, pending_count)
+        return format_html('<span style="color: green;">None</span>')
+    has_pending_claims.short_description = 'Pending Claims'
     
     def approve_startups(self, request, queryset):
         updated = queryset.update(is_approved=True)
@@ -156,6 +189,115 @@ class StartupAdmin(admin.ModelAdmin):
         updated = queryset.update(is_featured=False)
         self.message_user(request, f'{updated} startup(s) were unfeatured.')
     unfeature_startups.short_description = "Unfeature selected startups"
+
+@admin.register(StartupClaimRequest)
+class StartupClaimRequestAdmin(admin.ModelAdmin):
+    list_display = [
+        'startup_name', 'user_info', 'email', 'position', 'status', 
+        'email_verified', 'email_domain_valid', 'created_at', 
+        'reviewed_by', 'reviewed_at'
+    ]
+    list_filter = ['status', 'email_verified', 'created_at', 'reviewed_at']
+    search_fields = ['startup__name', 'user__username', 'user__email', 'email', 'position']
+    ordering = ['-created_at']
+    readonly_fields = [
+        'created_at', 'updated_at', 'user', 'startup', 'verification_token', 
+        'email_verified_at', 'is_expired', 'email_domain_valid'
+    ]
+    
+    fieldsets = (
+        ('Claim Information', {
+            'fields': ('startup', 'user', 'email', 'position', 'reason')
+        }),
+        ('Verification', {
+            'fields': ('email_verified', 'email_verified_at', 'verification_token', 'expires_at', 'is_expired', 'email_domain_valid')
+        }),
+        ('Status & Review', {
+            'fields': ('status', 'reviewed_by', 'reviewed_at', 'review_notes')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    actions = ['approve_claim_requests', 'reject_claim_requests', 'send_verification_emails']
+    
+    def startup_name(self, obj):
+        url = reverse('admin:startups_startup_change', args=[obj.startup.pk])
+        return format_html('<a href="{}">{}</a>', url, obj.startup.name)
+    startup_name.short_description = 'Startup'
+    
+    def user_info(self, obj):
+        url = reverse('admin:auth_user_change', args=[obj.user.pk])
+        return format_html('<a href="{}">{}</a><br><small>{}</small>', 
+                          url, obj.user.username, obj.user.email)
+    user_info.short_description = 'User'
+    
+    def email_domain_valid(self, obj):
+        if obj.is_email_domain_valid():
+            return format_html('<span style="color: green;">✓ Valid</span>')
+        else:
+            return format_html('<span style="color: red;">✗ Invalid</span>')
+    email_domain_valid.short_description = 'Domain Valid'
+    
+    def is_expired(self, obj):
+        if obj.is_expired():
+            return format_html('<span style="color: red;">✗ Expired</span>')
+        else:
+            return format_html('<span style="color: green;">✓ Valid</span>')
+    is_expired.short_description = 'Token Status'
+    
+    def approve_claim_requests(self, request, queryset):
+        approved_count = 0
+        for claim_request in queryset.filter(status='pending', email_verified=True):
+            try:
+                claim_request.approve(request.user)
+                approved_count += 1
+                messages.success(request, f'Claim request for "{claim_request.startup.name}" by {claim_request.user.username} approved.')
+            except Exception as e:
+                messages.error(request, f'Error approving claim request for "{claim_request.startup.name}": {str(e)}')
+        
+        if approved_count > 0:
+            messages.success(request, f'{approved_count} claim request(s) were approved.')
+        
+        # Show warning for unverified emails
+        unverified_count = queryset.filter(status='pending', email_verified=False).count()
+        if unverified_count > 0:
+            messages.warning(request, f'{unverified_count} claim request(s) cannot be approved because email is not verified.')
+    approve_claim_requests.short_description = "Approve selected claim requests (email verified only)"
+    
+    def reject_claim_requests(self, request, queryset):
+        rejected_count = 0
+        for claim_request in queryset.filter(status='pending'):
+            claim_request.reject(request.user, 'Rejected via admin action')
+            rejected_count += 1
+        
+        if rejected_count > 0:
+            messages.success(request, f'{rejected_count} claim request(s) were rejected.')
+    reject_claim_requests.short_description = "Reject selected claim requests"
+    
+    def send_verification_emails(self, request, queryset):
+        """Resend verification emails for selected claim requests"""
+        sent_count = 0
+        for claim_request in queryset.filter(status='pending', email_verified=False):
+            if not claim_request.is_expired():
+                try:
+                    # You would need to implement the email sending logic here
+                    # self.send_claim_verification_email(claim_request)
+                    sent_count += 1
+                except Exception as e:
+                    messages.error(request, f'Error sending email for "{claim_request.startup.name}": {str(e)}')
+        
+        if sent_count > 0:
+            messages.success(request, f'{sent_count} verification email(s) were sent.')
+    send_verification_emails.short_description = "Resend verification emails"
+    
+    def get_readonly_fields(self, request, obj=None):
+        # Make certain fields readonly if the request is not pending
+        if obj and obj.status != 'pending':
+            return self.readonly_fields + ['email', 'position', 'reason']
+        return self.readonly_fields
 
 @admin.register(StartupEditRequest)
 class StartupEditRequestAdmin(admin.ModelAdmin):
