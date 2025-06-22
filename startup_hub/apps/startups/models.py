@@ -1,4 +1,4 @@
-# startup_hub/apps/startups/models.py - Complete file with edit request functionality and image support
+# startup_hub/apps/startups/models.py - Complete file with startup claiming functionality
 
 from django.db import models
 from django.contrib.auth import get_user_model
@@ -7,6 +7,7 @@ from django.utils import timezone
 import json
 import os
 from uuid import uuid4
+import re
 
 User = get_user_model()
 
@@ -85,6 +86,18 @@ class Startup(models.Model):
     is_approved = models.BooleanField(default=False, help_text='Whether startup is approved for public listing')
     submitted_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='submitted_startups')
     
+    # NEW: Claiming functionality
+    claimed_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='claimed_startups',
+        help_text='User who has claimed this startup as their company'
+    )
+    is_claimed = models.BooleanField(default=False, help_text='Whether this startup has been claimed by a company representative')
+    claim_verified = models.BooleanField(default=False, help_text='Whether the claim has been verified by admin')
+    
     # Metrics
     revenue = models.CharField(max_length=20, blank=True)
     user_count = models.CharField(max_length=20, blank=True)
@@ -127,6 +140,16 @@ class Startup(models.Model):
             return self.cover_image_url
         return None
     
+    def get_company_domain(self):
+        """Extract domain from company website for email verification"""
+        if self.website:
+            # Remove protocol and www
+            domain = self.website.replace('https://', '').replace('http://', '').replace('www.', '')
+            # Remove trailing slash and path
+            domain = domain.split('/')[0]
+            return domain.lower()
+        return None
+    
     def can_edit(self, user):
         """Check if user can edit this startup"""
         if not user.is_authenticated:
@@ -134,6 +157,10 @@ class Startup(models.Model):
         
         # Admins can always edit
         if user.is_staff or user.is_superuser:
+            return True
+        
+        # Verified claimed user can edit
+        if self.is_claimed and self.claim_verified and self.claimed_by == user:
             return True
         
         # Original submitter can edit if they're premium
@@ -146,9 +173,28 @@ class Startup(models.Model):
         
         return False
     
+    def can_claim(self, user):
+        """Check if user can claim this startup"""
+        if not user.is_authenticated:
+            return False
+        
+        # Cannot claim if already claimed and verified
+        if self.is_claimed and self.claim_verified:
+            return False
+        
+        # Cannot claim if user has pending claim request
+        if self.claim_requests.filter(user=user, status='pending').exists():
+            return False
+        
+        return True
+    
     def has_pending_edits(self):
         """Check if there are pending edit requests"""
         return self.edit_requests.filter(status='pending').exists()
+    
+    def has_pending_claims(self):
+        """Check if there are pending claim requests"""
+        return self.claim_requests.filter(status='pending').exists()
     
     def save(self, *args, **kwargs):
         """Override save to handle cover image"""
@@ -165,7 +211,139 @@ class Startup(models.Model):
             models.Index(fields=['industry', 'is_approved'], name='startups_st_industr_7f011e_idx'),
             models.Index(fields=['location', 'is_approved'], name='startups_st_locatio_5f06e2_idx'),
             models.Index(fields=['created_at'], name='startups_st_created_93e688_idx'),
+            models.Index(fields=['is_claimed', 'claim_verified'], name='startups_st_claimed_idx'),
         ]
+
+class StartupClaimRequest(models.Model):
+    """Track requests from users to claim ownership of startups"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('expired', 'Expired'),
+    ]
+    
+    startup = models.ForeignKey(Startup, on_delete=models.CASCADE, related_name='claim_requests')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='startup_claim_requests')
+    email = models.EmailField(help_text='Work email for verification')
+    position = models.CharField(max_length=100, help_text='Position at the company')
+    reason = models.TextField(help_text='Reason for claiming this startup')
+    
+    # Verification
+    verification_token = models.CharField(max_length=64, unique=True, blank=True)
+    email_verified = models.BooleanField(default=False)
+    email_verified_at = models.DateTimeField(null=True, blank=True)
+    
+    # Status
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Review information
+    reviewed_by = models.ForeignKey(
+        User, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='reviewed_claim_requests'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(help_text='When the verification link expires')
+    
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ['startup', 'user']  # One claim request per user per startup
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['startup', 'status']),
+            models.Index(fields=['user', 'created_at']),
+            models.Index(fields=['verification_token']),
+        ]
+    
+    def __str__(self):
+        return f"Claim request for {self.startup.name} by {self.user.username}"
+    
+    def is_email_domain_valid(self):
+        """Check if the email domain matches the startup's website domain"""
+        if not self.email or not self.startup.website:
+            return False
+        
+        # Get email domain
+        email_domain = self.email.split('@')[1].lower()
+        
+        # Get startup domain
+        startup_domain = self.startup.get_company_domain()
+        
+        if not startup_domain:
+            return False
+        
+        # Check exact match or subdomain match
+        return email_domain == startup_domain or email_domain.endswith('.' + startup_domain)
+    
+    def generate_verification_token(self):
+        """Generate a unique verification token"""
+        import secrets
+        self.verification_token = secrets.token_urlsafe(32)
+        return self.verification_token
+    
+    def verify_email(self):
+        """Mark email as verified"""
+        self.email_verified = True
+        self.email_verified_at = timezone.now()
+        self.save(update_fields=['email_verified', 'email_verified_at'])
+    
+    def approve(self, admin_user, notes=''):
+        """Approve the claim request"""
+        if not self.email_verified:
+            raise ValueError("Email must be verified before approving claim")
+        
+        with models.transaction.atomic():
+            # Update claim request
+            self.status = 'approved'
+            self.reviewed_by = admin_user
+            self.reviewed_at = timezone.now()
+            self.review_notes = notes
+            self.save()
+            
+            # Update startup
+            self.startup.claimed_by = self.user
+            self.startup.is_claimed = True
+            self.startup.claim_verified = True
+            self.startup.save(update_fields=['claimed_by', 'is_claimed', 'claim_verified'])
+            
+            # Reject all other pending claims for this startup
+            StartupClaimRequest.objects.filter(
+                startup=self.startup,
+                status='pending'
+            ).exclude(id=self.id).update(
+                status='rejected',
+                reviewed_by=admin_user,
+                reviewed_at=timezone.now(),
+                review_notes='Automatically rejected - another claim was approved'
+            )
+        
+        return self
+    
+    def reject(self, admin_user, notes=''):
+        """Reject the claim request"""
+        self.status = 'rejected'
+        self.reviewed_by = admin_user
+        self.reviewed_at = timezone.now()
+        self.review_notes = notes
+        self.save()
+        return self
+    
+    def is_expired(self):
+        """Check if the verification link has expired"""
+        return timezone.now() > self.expires_at
+    
+    def mark_expired(self):
+        """Mark the claim request as expired"""
+        self.status = 'expired'
+        self.save(update_fields=['status'])
 
 class StartupEditRequest(models.Model):
     """Track edit requests from premium members that need admin approval"""
