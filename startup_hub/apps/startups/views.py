@@ -1,4 +1,4 @@
-# apps/startups/views.py - Complete Working Version with Edit Request Feature and Image Upload
+# apps/startups/views.py - Complete Working Version with Edit Request Feature and Industry ForeignKey Fix
 
 import logging
 from rest_framework import viewsets, status, filters
@@ -281,7 +281,7 @@ class StartupViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def submit_edit(self, request, pk=None):
-        """Submit an edit request for a startup"""
+        """Submit an edit request for a startup - FIXED VERSION"""
         logger.info(f"Edit request for startup {pk} by user: {request.user}")
         
         try:
@@ -350,7 +350,7 @@ class StartupViewSet(viewsets.ModelViewSet):
                     startup.social_media = social_media_data
                     startup.save(update_fields=['social_media'])
                 proposed_changes.pop('social_media')
-            
+
             with transaction.atomic():
                 if is_admin:
                     # Admin can directly update the startup
@@ -358,9 +358,25 @@ class StartupViewSet(viewsets.ModelViewSet):
                     
                     for field, value in proposed_changes.items():
                         if hasattr(startup, field):
-                            setattr(startup, field, value)
+                            # FIXED: Handle ForeignKey fields properly
+                            if field == 'industry':
+                                # Convert industry ID to Industry instance
+                                try:
+                                    industry = Industry.objects.get(id=int(value))
+                                    setattr(startup, field, industry)
+                                    print(f"DEBUG: Successfully set industry to {industry.name} (ID: {industry.id})")
+                                except (Industry.DoesNotExist, ValueError, TypeError) as e:
+                                    logger.error(f"Invalid industry ID: {value}, error: {str(e)}")
+                                    return Response({
+                                        'error': f'Invalid industry ID: {value}. Please select a valid industry.'
+                                    }, status=status.HTTP_400_BAD_REQUEST)
+                            else:
+                                # For regular fields, set directly
+                                setattr(startup, field, value)
+                                print(f"DEBUG: Set {field} to {value}")
                     
                     startup.save()
+                    print(f"DEBUG: Startup saved successfully")
                     
                     # Return updated startup
                     serializer = StartupDetailSerializer(startup, context={'request': request})
@@ -391,7 +407,11 @@ class StartupViewSet(viewsets.ModelViewSet):
                     original_values = {}
                     for field in proposed_changes.keys():
                         if hasattr(startup, field):
-                            original_values[field] = getattr(startup, field)
+                            if field == 'industry':
+                                # Store industry ID for edit requests
+                                original_values[field] = startup.industry.id if startup.industry else None
+                            else:
+                                original_values[field] = getattr(startup, field)
                     
                     # Create edit request
                     edit_request = StartupEditRequest.objects.create(
