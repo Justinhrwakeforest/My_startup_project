@@ -1,4 +1,4 @@
-# startup_hub/apps/jobs/serializers.py - Fixed version without syntax errors
+# startup_hub/apps/jobs/serializers.py - Updated with proper can_edit field
 
 from rest_framework import serializers
 from django.db import models
@@ -84,12 +84,13 @@ class JobDetailSerializer(JobListSerializer):
     requirements_list = serializers.SerializerMethodField()
     benefits_list = serializers.SerializerMethodField()
     posted_by_info = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
     
     class Meta(JobListSerializer.Meta):
         fields = JobListSerializer.Meta.fields + [
             'startup_detail', 'skills', 'similar_jobs', 'requirements', 'benefits',
             'requirements_list', 'benefits_list', 'posted_by_info', 'company_email',
-            'application_deadline', 'expires_at'
+            'application_deadline', 'expires_at', 'can_delete', 'rejection_reason'
         ]
     
     def get_startup_detail(self, obj):
@@ -159,6 +160,12 @@ class JobDetailSerializer(JobListSerializer):
                     'is_verified': obj.is_verified
                 }
         return None
+    
+    def get_can_delete(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.can_user_delete(request.user)
+        return False
 
 class JobCreateSerializer(serializers.ModelSerializer):
     skills = serializers.ListField(
@@ -309,17 +316,32 @@ class JobEditSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         skills_data = validated_data.pop('skills', None)
         
-        # Check if job can be edited
-        if not instance.can_edit:
-            raise serializers.ValidationError("This job cannot be edited in its current status")
+        # Check if job can be edited (additional validation)
+        request = self.context.get('request')
+        if request and not instance.can_user_edit(request.user):
+            raise serializers.ValidationError("This job cannot be edited")
+        
+        # Store original status and check if this is a non-admin edit
+        original_status = instance.status
+        is_admin_edit = request and (request.user.is_staff or request.user.is_superuser)
+        is_poster_edit = request and request.user == instance.posted_by and not is_admin_edit
         
         # Update job fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         
-        # If job was rejected, reset to pending when edited
-        if instance.status == 'rejected':
-            instance.status = 'pending'
+        # Handle approval workflow for non-admin edits
+        if is_poster_edit:
+            if original_status in ['active', 'rejected']:
+                # Reset to pending for re-approval
+                instance.status = 'pending'
+                instance.is_active = False
+                instance.approved_by = None
+                instance.approved_at = None
+                instance.rejection_reason = ''
+            elif original_status in ['draft', 'pending']:
+                # Keep as pending if already pending or draft
+                instance.status = 'pending'
         
         instance.save()
         
@@ -373,6 +395,7 @@ class MyJobsSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     application_count = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
     approval_info = serializers.SerializerMethodField()
     
     class Meta:
@@ -380,7 +403,7 @@ class MyJobsSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'startup', 'startup_name', 'job_type_name', 'location',
             'status', 'status_display', 'is_active', 'is_verified', 'posted_at',
-            'view_count', 'application_count', 'can_edit', 'approval_info'
+            'view_count', 'application_count', 'can_edit', 'can_delete', 'approval_info'
         ]
     
     def get_application_count(self, obj):
@@ -390,6 +413,12 @@ class MyJobsSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             return obj.can_user_edit(request.user)
+        return False
+    
+    def get_can_delete(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.can_user_delete(request.user)
         return False
     
     def get_approval_info(self, obj):
