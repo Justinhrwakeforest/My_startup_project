@@ -1,4 +1,4 @@
-# startup_hub/apps/jobs/views.py - Updated with job upload, edit, and admin approval
+# startup_hub/apps/jobs/views.py - Updated with proper edit permissions
 
 import logging
 from rest_framework import viewsets, status, filters
@@ -32,8 +32,11 @@ class JobViewSet(viewsets.ModelViewSet):
     ordering = ['-posted_at']
     
     def get_queryset(self):
-        # For list/retrieve, only show approved jobs
-        if self.action in ['list', 'retrieve']:
+        # For list/retrieve, only show approved jobs to non-authenticated users
+        if self.action in ['list', 'retrieve'] and not self.request.user.is_authenticated:
+            queryset = Job.objects.filter(is_active=True, status='active')
+        # For authenticated users in list/retrieve, show all active jobs
+        elif self.action in ['list', 'retrieve']:
             queryset = Job.objects.filter(is_active=True, status='active')
         else:
             # For other actions, show all jobs (with proper permissions)
@@ -197,19 +200,30 @@ class JobViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Job not found'}, status=status.HTTP_404_NOT_FOUND)
     
     def update(self, request, *args, **kwargs):
-        """Update job posting (only allowed for draft/pending/rejected jobs)"""
+        """Update job posting with enhanced permission checking"""
         instance = self.get_object()
         
-        # Check permissions
+        # Enhanced permission checking
         if not instance.can_user_edit(request.user):
-            return Response({
-                'error': 'You do not have permission to edit this job'
-            }, status=status.HTTP_403_FORBIDDEN)
+            logger.warning(f"User {request.user} attempted to edit job {instance.id} without permission")
+            
+            if request.user.is_staff or request.user.is_superuser:
+                # Admin can edit any job, but we need to handle status changes
+                pass
+            elif request.user == instance.posted_by:
+                if instance.status not in ['draft', 'pending', 'rejected']:
+                    return Response({
+                        'error': f'Cannot edit job in {instance.status} status. Only draft, pending, or rejected jobs can be edited.'
+                    }, status=status.HTTP_403_FORBIDDEN)
+            else:
+                return Response({
+                    'error': 'You do not have permission to edit this job. Only the job poster or admin can edit jobs.'
+                }, status=status.HTTP_403_FORBIDDEN)
         
-        if not instance.can_edit:
-            return Response({
-                'error': 'This job cannot be edited in its current status'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        # Store original status and user info
+        original_status = instance.status
+        is_admin_edit = request.user.is_staff or request.user.is_superuser
+        is_poster_edit = request.user == instance.posted_by and not is_admin_edit
         
         # Proceed with update
         partial = kwargs.pop('partial', False)
@@ -218,28 +232,47 @@ class JobViewSet(viewsets.ModelViewSet):
         if serializer.is_valid():
             job = serializer.save()
             
-            # Re-verify email if changed
+            # Handle re-approval workflow for non-admin edits
+            if is_poster_edit:
+                # If original poster (non-admin) edits, reset to pending for re-approval
+                if original_status in ['active', 'rejected']:
+                    job.reset_for_reapproval(request.user)
+                    logger.info(f"Job {job.title} reset to pending for re-approval after edit by poster {request.user}")
+                elif original_status == 'pending':
+                    # Keep as pending if already pending
+                    job.status = 'pending'
+                    job.save(update_fields=['status'])
+            
+            # Re-verify email if changed (for both admin and poster)
             if 'company_email' in request.data:
                 job.verify_company_email()
             
             response_serializer = JobDetailSerializer(job, context={'request': request})
             
-            logger.info(f"Job updated: {job.title} by {request.user}")
+            # Create appropriate response message
+            if is_poster_edit and original_status == 'active':
+                message = 'Job updated successfully and submitted for re-approval. Your changes will be reviewed by our admin team.'
+            elif is_poster_edit:
+                message = 'Job updated successfully. Your changes will be reviewed by our admin team before being published.'
+            else:
+                message = 'Job updated successfully'
+            
+            logger.info(f"Job updated: {job.title} by {request.user} (Status: {job.status})")
             
             return Response({
-                'message': 'Job updated successfully',
-                'job': response_serializer.data
+                'message': message,
+                'job': response_serializer.data,
+                'requires_approval': is_poster_edit,
+                'new_status': job.status
             })
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
     def destroy(self, request, *args, **kwargs):
-        """Delete job posting (only poster or admin can delete)"""
+        """Delete job posting with enhanced permission checking"""
         instance = self.get_object()
         
-        if not (request.user == instance.posted_by or 
-                request.user.is_staff or 
-                request.user.is_superuser):
+        if not instance.can_user_delete(request.user):
             return Response({
                 'error': 'You do not have permission to delete this job'
             }, status=status.HTTP_403_FORBIDDEN)
