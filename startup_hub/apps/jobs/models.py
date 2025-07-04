@@ -126,7 +126,8 @@ class Job(models.Model):
     
     @property
     def can_edit(self):
-        """Check if job can be edited"""
+        """Check if job can be edited by the original poster"""
+        # Original poster can edit draft, pending, rejected jobs
         return self.status in ['draft', 'pending', 'rejected']
     
     def increment_view_count(self):
@@ -185,12 +186,48 @@ class Job(models.Model):
     
     def can_user_edit(self, user):
         """Check if a specific user can edit this job"""
-        # Only the poster can edit, and only if job is not approved yet
-        return (
-            user == self.posted_by and 
-            self.status in ['draft', 'pending', 'rejected'] and
-            user.is_authenticated
-        )
+        if not user or not user.is_authenticated:
+            return False
+        
+        # Admins can edit any job without approval workflow
+        if user.is_staff or user.is_superuser:
+            return True
+        
+        # Original poster can edit draft, pending, or rejected jobs
+        # When they edit, the job will be reset to pending for re-approval
+        if user == self.posted_by:
+            return self.status in ['draft', 'pending', 'rejected']
+        
+        return False
+    
+    def reset_for_reapproval(self, edited_by):
+        """Reset job to pending status when edited by non-admin poster"""
+        if not (edited_by.is_staff or edited_by.is_superuser):
+            # Only reset if edited by non-admin (the original poster)
+            self.status = 'pending'
+            self.is_active = False
+            self.approved_by = None
+            self.approved_at = None
+            self.rejection_reason = ''
+            self.save(update_fields=[
+                'status', 'is_active', 'approved_by', 
+                'approved_at', 'rejection_reason'
+            ])
+    
+    def can_user_delete(self, user):
+        """Check if a specific user can delete this job"""
+        if not user or not user.is_authenticated:
+            return False
+        
+        # Admins can delete any job
+        if user.is_staff or user.is_superuser:
+            return True
+        
+        # Original poster can delete their own jobs
+        if user == self.posted_by:
+            return True
+        
+        return False
 
 class JobEditRequest(models.Model):
     """Track edit requests for approved jobs"""
