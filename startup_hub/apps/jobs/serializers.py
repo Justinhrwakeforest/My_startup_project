@@ -3,6 +3,7 @@
 from rest_framework import serializers
 from django.db import models
 from django.contrib.auth import get_user_model
+from apps.startups.models import Startup
 from .models import JobType, Job, JobSkill, JobApplication, JobEditRequest
 
 User = get_user_model()
@@ -28,11 +29,11 @@ class JobSkillCreateSerializer(serializers.ModelSerializer):
         fields = ['skill', 'is_required', 'proficiency_level']
 
 class JobListSerializer(serializers.ModelSerializer):
-    startup_name = serializers.CharField(source='startup.name', read_only=True)
-    startup_logo = serializers.CharField(source='startup.logo', read_only=True)
-    startup_location = serializers.CharField(source='startup.location', read_only=True)
-    startup_industry = serializers.CharField(source='startup.industry.name', read_only=True)
-    startup_employee_count = serializers.IntegerField(source='startup.employee_count', read_only=True)
+    startup_name = serializers.SerializerMethodField()
+    startup_logo = serializers.SerializerMethodField()
+    startup_location = serializers.SerializerMethodField()
+    startup_industry = serializers.SerializerMethodField()
+    startup_employee_count = serializers.SerializerMethodField()
     job_type_name = serializers.CharField(source='job_type.name', read_only=True)
     skills_list = serializers.StringRelatedField(source='skills', many=True, read_only=True)
     posted_ago = serializers.ReadOnlyField()
@@ -56,6 +57,21 @@ class JobListSerializer(serializers.ModelSerializer):
             'days_since_posted', 'application_count', 'can_edit', 'posted_by_username',
             'is_verified', 'view_count'
         ]
+    
+    def get_startup_name(self, obj):
+        return obj.startup.name if obj.startup else 'Independent Job Posting'
+    
+    def get_startup_logo(self, obj):
+        return obj.startup.logo if obj.startup else ''
+    
+    def get_startup_location(self, obj):
+        return obj.startup.location if obj.startup else ''
+    
+    def get_startup_industry(self, obj):
+        return obj.startup.industry.name if obj.startup and obj.startup.industry else 'Not specified'
+    
+    def get_startup_employee_count(self, obj):
+        return obj.startup.employee_count if obj.startup else 0
     
     def get_has_applied(self, obj):
         request = self.context.get('request')
@@ -94,14 +110,32 @@ class JobDetailSerializer(JobListSerializer):
         ]
     
     def get_startup_detail(self, obj):
+        if not obj.startup:
+            return {
+                'id': None,
+                'name': 'Independent Job Posting',
+                'logo': '',
+                'description': 'This job was posted independently without a company profile.',
+                'industry_name': 'Not specified',
+                'industry_icon': '',
+                'location': '',
+                'website': '',
+                'employee_count': 0,
+                'founded_year': None,
+                'is_featured': False,
+                'funding_amount': '',
+                'valuation': '',
+                'cover_image_display_url': None,
+            }
+            
         startup = obj.startup
         return {
             'id': startup.id,
             'name': startup.name,
             'logo': startup.logo,
             'description': startup.description,
-            'industry_name': startup.industry.name,
-            'industry_icon': startup.industry.icon,
+            'industry_name': startup.industry.name if startup.industry else 'Not specified',
+            'industry_icon': startup.industry.icon if startup.industry else '',
             'location': startup.location,
             'website': startup.website,
             'employee_count': startup.employee_count,
@@ -113,15 +147,20 @@ class JobDetailSerializer(JobListSerializer):
         }
     
     def get_similar_jobs(self, obj):
-        similar = Job.objects.filter(
-            models.Q(startup=obj.startup) | 
-            models.Q(skills__skill__in=obj.skills.values_list('skill', flat=True))
-        ).exclude(id=obj.id).filter(is_active=True, status='active').distinct()[:3]
+        query_filter = models.Q(skills__skill__in=obj.skills.values_list('skill', flat=True))
+        
+        # Only add startup filter if the job has a startup
+        if obj.startup:
+            query_filter |= models.Q(startup=obj.startup)
+            
+        similar = Job.objects.filter(query_filter).exclude(
+            id=obj.id
+        ).filter(is_active=True, status='active').distinct()[:3]
         
         return [{
             'id': job.id,
             'title': job.title,
-            'startup_name': job.startup.name,
+            'startup_name': job.startup.name if job.startup else 'Independent Job Posting',
             'location': job.location,
             'is_remote': job.is_remote,
             'posted_ago': job.posted_ago
@@ -174,6 +213,11 @@ class JobCreateSerializer(serializers.ModelSerializer):
         required=False,
         help_text="List of skill objects with skill, is_required, and proficiency_level"
     )
+    startup = serializers.PrimaryKeyRelatedField(
+        queryset=Startup.objects.filter(is_approved=True),
+        required=False,
+        allow_null=True
+    )
     
     class Meta:
         model = Job
@@ -185,7 +229,6 @@ class JobCreateSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'title': {'required': True},
             'description': {'required': True},
-            'startup': {'required': True},
             'location': {'required': True},
             'job_type': {'required': True},
             'company_email': {'required': True},
@@ -218,7 +261,7 @@ class JobCreateSerializer(serializers.ModelSerializer):
         return value.lower()
     
     def validate_startup(self, value):
-        if not value.is_approved:
+        if value and not value.is_approved:
             raise serializers.ValidationError("Can only post jobs for approved startups")
         return value
     
@@ -390,7 +433,7 @@ class JobApplicationSerializer(serializers.ModelSerializer):
 
 class MyJobsSerializer(serializers.ModelSerializer):
     """Serializer for jobs posted by the current user"""
-    startup_name = serializers.CharField(source='startup.name', read_only=True)
+    startup_name = serializers.SerializerMethodField()
     job_type_name = serializers.CharField(source='job_type.name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     application_count = serializers.SerializerMethodField()
@@ -405,6 +448,9 @@ class MyJobsSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'is_active', 'is_verified', 'posted_at',
             'view_count', 'application_count', 'can_edit', 'can_delete', 'approval_info'
         ]
+    
+    def get_startup_name(self, obj):
+        return obj.startup.name if obj.startup else 'Independent Job Posting'
     
     def get_application_count(self, obj):
         return obj.applications.count()
