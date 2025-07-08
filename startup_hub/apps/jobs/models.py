@@ -33,7 +33,7 @@ class Job(models.Model):
     ]
     
     # Basic job information
-    startup = models.ForeignKey('startups.Startup', on_delete=models.CASCADE, related_name='jobs')
+    startup = models.ForeignKey('startups.Startup', on_delete=models.CASCADE, related_name='jobs', null=True, blank=True)
     title = models.CharField(max_length=100)
     description = models.TextField()
     location = models.CharField(max_length=100)
@@ -85,7 +85,8 @@ class Job(models.Model):
         ]
     
     def __str__(self):
-        return f"{self.title} at {self.startup.name}"
+        startup_name = self.startup.name if self.startup else "Independent"
+        return f"{self.title} at {startup_name}"
     
     @property
     def posted_ago(self):
@@ -137,10 +138,16 @@ class Job(models.Model):
     
     def verify_company_email(self):
         """Verify if email domain matches company"""
-        if not self.company_email or not self.startup:
+        if not self.company_email:
             return False
         
         email_domain = self.company_email.split('@')[1].lower()
+        
+        # If no startup, just mark as verified if email looks valid
+        if not self.startup:
+            self.is_verified = True
+            self.save(update_fields=['is_verified'])
+            return True
         
         # Check if startup website domain matches email domain
         if self.startup.website:
