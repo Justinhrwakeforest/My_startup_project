@@ -1,4 +1,4 @@
-# startup_hub/apps/jobs/models.py - Complete models file with approval system and company verification
+# startup_hub/apps/jobs/models.py - Updated without email verification requirement
 
 from django.db import models
 from django.contrib.auth import get_user_model
@@ -60,8 +60,8 @@ class Job(models.Model):
     
     # Approval and posting tracking
     posted_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posted_jobs')
-    company_email = models.EmailField(help_text="Company email to verify authorization")
-    is_verified = models.BooleanField(default=False, help_text="Email domain verified against company")
+    company_email = models.EmailField(help_text="Company contact email")
+    # Removed is_verified field - no longer needed
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_jobs')
     approved_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
@@ -135,44 +135,6 @@ class Job(models.Model):
         """Increment view count"""
         self.view_count += 1
         self.save(update_fields=['view_count'])
-    
-    def verify_company_email(self):
-        """Verify if email domain matches company"""
-        if not self.company_email:
-            return False
-        
-        email_domain = self.company_email.split('@')[1].lower()
-        
-        # If no startup, just mark as verified if email looks valid
-        if not self.startup:
-            self.is_verified = True
-            self.save(update_fields=['is_verified'])
-            return True
-        
-        # Check if startup website domain matches email domain
-        if self.startup.website:
-            # Extract domain from website URL
-            website_domain = self.startup.website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0].lower()
-            
-            # Check for exact match or subdomain match
-            if email_domain == website_domain or email_domain.endswith('.' + website_domain):
-                self.is_verified = True
-                self.save(update_fields=['is_verified'])
-                return True
-        
-        # Check against common company domain patterns
-        company_name_parts = self.startup.name.lower().replace(' ', '').replace('-', '').replace('_', '')
-        
-        # Remove common suffixes
-        for suffix in ['.com', '.org', '.net', '.io']:
-            if email_domain.endswith(suffix):
-                domain_name = email_domain.replace(suffix, '')
-                if domain_name in company_name_parts or company_name_parts in domain_name:
-                    self.is_verified = True
-                    self.save(update_fields=['is_verified'])
-                    return True
-        
-        return False
     
     def approve(self, approved_by_user):
         """Approve the job posting"""
