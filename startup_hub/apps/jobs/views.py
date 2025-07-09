@@ -1,4 +1,4 @@
-# startup_hub/apps/jobs/views.py - Updated with proper edit permissions
+# startup_hub/apps/jobs/views.py - Updated without email verification requirement
 
 import logging
 from rest_framework import viewsets, status, filters
@@ -165,11 +165,10 @@ class JobViewSet(viewsets.ModelViewSet):
             logger.info(f"Job created successfully: {job.title} (ID: {job.id})")
             
             return Response({
-                'message': 'Job posted successfully! It will be reviewed before being published.',
+                'message': 'Job posted successfully! It will be reviewed by our admin team before being published.',
                 'job': response_serializer.data,
                 'id': job.id,
                 'status': job.status,
-                'is_verified': job.is_verified,
                 'success': True
             }, status=status.HTTP_201_CREATED)
             
@@ -242,10 +241,6 @@ class JobViewSet(viewsets.ModelViewSet):
                     # Keep as pending if already pending
                     job.status = 'pending'
                     job.save(update_fields=['status'])
-            
-            # Re-verify email if changed (for both admin and poster)
-            if 'company_email' in request.data:
-                job.verify_company_email()
             
             response_serializer = JobDetailSerializer(job, context={'request': request})
             
@@ -490,8 +485,7 @@ class JobViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(status='active')
         elif filter_type == 'rejected':
             queryset = queryset.filter(status='rejected')
-        elif filter_type == 'unverified':
-            queryset = queryset.filter(is_verified=False)
+        # Removed unverified filter since we're not using email verification anymore
         
         # Apply search
         if search:
@@ -516,7 +510,7 @@ class JobViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['patch'], permission_classes=[IsAuthenticated], url_path='admin')
     def admin_action(self, request, pk=None):
-        """Admin actions: approve, reject, verify email"""
+        """Admin actions: approve, reject"""
         if not (request.user.is_staff or request.user.is_superuser):
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
         
@@ -528,28 +522,12 @@ class JobViewSet(viewsets.ModelViewSet):
         
         try:
             if action_type == 'approve':
-                if not job.is_verified:
-                    return Response({'error': 'Cannot approve job with unverified email'}, 
-                                  status=status.HTTP_400_BAD_REQUEST)
-                
                 job.approve(request.user)
                 return Response({'message': 'Job approved successfully'})
             
             elif action_type == 'reject':
                 job.reject(request.user, reason)
                 return Response({'message': 'Job rejected successfully'})
-            
-            elif action_type == 'verify_email':
-                verification_result = job.verify_company_email()
-                if verification_result:
-                    return Response({'message': 'Email verified successfully'})
-                else:
-                    return Response({'message': 'Email could not be automatically verified'})
-            
-            elif action_type == 'force_verify':
-                job.is_verified = True
-                job.save(update_fields=['is_verified'])
-                return Response({'message': 'Email force verified'})
             
             elif action_type == 'deactivate':
                 job.is_active = False
@@ -582,24 +560,17 @@ class JobViewSet(viewsets.ModelViewSet):
             jobs = Job.objects.filter(id__in=job_ids)
             
             if action_type == 'approve':
-                # Only approve verified jobs
-                verified_jobs = jobs.filter(is_verified=True, status='pending')
-                for job in verified_jobs:
+                # Approve all pending jobs
+                pending_jobs = jobs.filter(status='pending')
+                for job in pending_jobs:
                     job.approve(request.user)
-                return Response({'message': f'{verified_jobs.count()} jobs approved successfully'})
+                return Response({'message': f'{pending_jobs.count()} jobs approved successfully'})
             
             elif action_type == 'reject':
                 pending_jobs = jobs.filter(status='pending')
                 for job in pending_jobs:
                     job.reject(request.user, 'Bulk rejection')
                 return Response({'message': f'{pending_jobs.count()} jobs rejected successfully'})
-            
-            elif action_type == 'verify_emails':
-                verified_count = 0
-                for job in jobs:
-                    if job.verify_company_email():
-                        verified_count += 1
-                return Response({'message': f'{verified_count} emails verified'})
             
             else:
                 return Response({'error': 'Invalid action'}, status=status.HTTP_400_BAD_REQUEST)
@@ -619,7 +590,6 @@ class JobViewSet(viewsets.ModelViewSet):
             'pending_jobs': Job.objects.filter(status='pending').count(),
             'active_jobs': Job.objects.filter(status='active').count(),
             'rejected_jobs': Job.objects.filter(status='rejected').count(),
-            'unverified_emails': Job.objects.filter(is_verified=False).count(),
             'total_applications': JobApplication.objects.count(),
             'jobs_this_week': Job.objects.filter(posted_at__gte=timezone.now() - timedelta(days=7)).count(),
         }
