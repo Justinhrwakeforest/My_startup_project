@@ -1,4 +1,4 @@
-# startup_hub/apps/jobs/admin.py - Updated with approval management
+# startup_hub/apps/jobs/admin.py - Updated without email verification
 
 from django.contrib import admin
 from django.utils.html import format_html
@@ -19,18 +19,18 @@ class JobTypeAdmin(admin.ModelAdmin):
 @admin.register(Job)
 class JobAdmin(admin.ModelAdmin):
     list_display = [
-        'title', 'startup', 'posted_by', 'company_email', 'email_verified_status', 
+        'title', 'startup', 'posted_by', 'company_email', 
         'status', 'approval_status', 'location', 'job_type', 'is_remote', 
         'is_urgent', 'posted_at', 'application_count'
     ]
     list_filter = [
-        'status', 'is_verified', 'job_type', 'is_remote', 'is_urgent', 
+        'status', 'job_type', 'is_remote', 'is_urgent', 
         'experience_level', 'posted_at', 'approved_at'
     ]
     search_fields = ['title', 'description', 'startup__name', 'posted_by__username', 'company_email']
     readonly_fields = [
         'posted_at', 'updated_at', 'view_count', 'posted_by', 'approved_by', 
-        'approved_at', 'email_verification_check'
+        'approved_at'
     ]
     
     fieldsets = (
@@ -44,7 +44,7 @@ class JobAdmin(admin.ModelAdmin):
             'fields': ('is_remote', 'is_urgent', 'application_deadline', 'expires_at')
         }),
         ('Posting Information', {
-            'fields': ('posted_by', 'company_email', 'email_verification_check', 'is_verified')
+            'fields': ('posted_by', 'company_email')
         }),
         ('Status & Approval', {
             'fields': ('status', 'is_active', 'approved_by', 'approved_at', 'rejection_reason')
@@ -55,15 +55,7 @@ class JobAdmin(admin.ModelAdmin):
         }),
     )
     
-    actions = ['approve_jobs', 'reject_jobs', 'verify_emails', 'deactivate_jobs']
-    
-    def email_verified_status(self, obj):
-        """Display email verification status"""
-        if obj.is_verified:
-            return format_html('<span style="color: green;">✓ Verified</span>')
-        else:
-            return format_html('<span style="color: red;">✗ Unverified</span>')
-    email_verified_status.short_description = 'Email Status'
+    actions = ['approve_jobs', 'reject_jobs', 'deactivate_jobs']
     
     def approval_status(self, obj):
         """Display approval status with colors"""
@@ -92,42 +84,15 @@ class JobAdmin(admin.ModelAdmin):
         return "0 applications"
     application_count.short_description = 'Applications'
     
-    def email_verification_check(self, obj):
-        """Show email verification details"""
-        if not obj.company_email:
-            return "No email provided"
-        
-        domain = obj.company_email.split('@')[1] if '@' in obj.company_email else 'Invalid'
-        website_domain = ''
-        
-        if obj.startup and obj.startup.website:
-            website_domain = obj.startup.website.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
-        
-        return format_html(
-            'Email: {}<br>Domain: {}<br>Company Website: {}<br>Match: {}',
-            obj.company_email,
-            domain,
-            website_domain or 'Not provided',
-            '✓ Yes' if obj.is_verified else '✗ No'
-        )
-    email_verification_check.short_description = 'Email Verification Details'
-    
     def approve_jobs(self, request, queryset):
         """Approve selected job postings"""
         pending_jobs = queryset.filter(status='pending')
         approved_count = 0
         
         for job in pending_jobs:
-            # Verify email before approving
-            if not job.is_verified:
-                job.verify_company_email()
-            
-            if job.is_verified:
-                job.approve(request.user)
-                approved_count += 1
-                messages.success(request, f'Approved job: {job.title}')
-            else:
-                messages.warning(request, f'Cannot approve {job.title}: Email not verified')
+            job.approve(request.user)
+            approved_count += 1
+            messages.success(request, f'Approved job: {job.title}')
         
         if approved_count > 0:
             messages.success(request, f'{approved_count} job(s) approved successfully.')
@@ -145,17 +110,6 @@ class JobAdmin(admin.ModelAdmin):
         if rejected_count > 0:
             messages.success(request, f'{rejected_count} job(s) rejected.')
     reject_jobs.short_description = "Reject selected jobs"
-    
-    def verify_emails(self, request, queryset):
-        """Verify company emails for selected jobs"""
-        verified_count = 0
-        
-        for job in queryset:
-            if job.verify_company_email():
-                verified_count += 1
-        
-        messages.success(request, f'{verified_count} email(s) verified.')
-    verify_emails.short_description = "Verify company emails"
     
     def deactivate_jobs(self, request, queryset):
         """Deactivate selected jobs"""
@@ -202,7 +156,7 @@ class JobEditRequestAdmin(admin.ModelAdmin):
     
     def job_startup(self, obj):
         """Show startup name"""
-        return obj.job.startup.name
+        return obj.job.startup.name if obj.job.startup else 'Independent'
     job_startup.short_description = 'Startup'
     
     def changes_preview(self, obj):
