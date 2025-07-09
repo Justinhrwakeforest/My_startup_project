@@ -1,4 +1,4 @@
-# startup_hub/apps/jobs/serializers.py - Updated with proper can_edit field
+# startup_hub/apps/jobs/serializers.py - Updated without email verification checks
 
 from rest_framework import serializers
 from django.db import models
@@ -44,7 +44,6 @@ class JobListSerializer(serializers.ModelSerializer):
     application_count = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
     posted_by_username = serializers.CharField(source='posted_by.username', read_only=True)
-    is_verified = serializers.ReadOnlyField()
     
     class Meta:
         model = Job
@@ -55,7 +54,7 @@ class JobListSerializer(serializers.ModelSerializer):
             'startup_location', 'startup_industry', 'startup_employee_count', 
             'job_type', 'job_type_name', 'skills_list', 'posted_ago', 'has_applied', 
             'days_since_posted', 'application_count', 'can_edit', 'posted_by_username',
-            'is_verified', 'view_count'
+            'view_count'
         ]
     
     def get_startup_name(self, obj):
@@ -195,8 +194,7 @@ class JobDetailSerializer(JobListSerializer):
                 request.user == obj.posted_by):
                 return {
                     'username': obj.posted_by.username,
-                    'email': obj.company_email,
-                    'is_verified': obj.is_verified
+                    'email': obj.company_email
                 }
         return None
     
@@ -322,9 +320,6 @@ class JobCreateSerializer(serializers.ModelSerializer):
         # Create the job
         job = Job.objects.create(**validated_data)
         
-        # Verify company email
-        job.verify_company_email()
-        
         # Create skills
         for skill_data in skills_data:
             JobSkill.objects.create(job=job, **skill_data)
@@ -445,7 +440,7 @@ class MyJobsSerializer(serializers.ModelSerializer):
         model = Job
         fields = [
             'id', 'title', 'startup', 'startup_name', 'job_type_name', 'location',
-            'status', 'status_display', 'is_active', 'is_verified', 'posted_at',
+            'status', 'status_display', 'is_active', 'posted_at',
             'view_count', 'application_count', 'can_edit', 'can_delete', 'approval_info'
         ]
     
@@ -469,7 +464,6 @@ class MyJobsSerializer(serializers.ModelSerializer):
     
     def get_approval_info(self, obj):
         info = {
-            'is_verified': obj.is_verified,
             'approved_at': obj.approved_at,
             'rejection_reason': obj.rejection_reason
         }
