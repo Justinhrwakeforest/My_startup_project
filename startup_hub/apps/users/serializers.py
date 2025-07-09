@@ -65,9 +65,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', 'bio', 
             'location', 'is_premium', 'member_since', 'interests',
-            'total_ratings', 'total_comments', 'total_bookmarks', 'total_likes'
+            'total_ratings', 'total_comments', 'total_bookmarks', 'total_likes',
+            'is_staff', 'is_superuser'  # Added admin permission fields
         ]
-        read_only_fields = ['email', 'is_premium']
+        read_only_fields = ['email', 'is_premium', 'is_staff', 'is_superuser']  # Make admin fields read-only
     
     def get_total_ratings(self, obj):
         return obj.startuprating_set.count()
